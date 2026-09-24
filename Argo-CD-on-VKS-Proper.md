@@ -1,6 +1,6 @@
 # Argo CD on VKS
 
-**VMware Argo CD Supervisor Service — Internet-Connected & Air-Gapped (Helm-Based Deployment)**
+**VMware Argo CD Supervisor Service — Internet-Connected & Air-Gapped**
 
 - **Argo CD Supervisor Service:** 1.2.0
 
