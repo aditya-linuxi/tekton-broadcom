@@ -893,15 +893,15 @@ Label the namespace:
 ```
 kubectl label namespace cicd pod-security.kubernetes.io/enforce=privileged --overwrite
 ```
- ## Build Installtion 
+ # Tasks
  
- ### Tools
- 
-Buildpacks: Phases Task	A ready-made Tekton Task that builds an image from source code.	Builds the image when there is no Dockerfile.
+ ## Buildpacks and BuildKit Installtion 
 
-BuildKit:	A tool that builds an image from a Dockerfile. Builds the image when a Dockerfile exists.
- 
-### Buildpacks Install
+Buildpacks:  Phases Task	A ready-made Tekton Task that builds an image from source code.	Builds the image when there is no Dockerfile.
+
+BuildKit:	 A tool that builds an image from a Dockerfile. Builds the image when a Dockerfile exists.
+
+### Buildpacks 
   
 Create buildpacks-phases.yaml
 ```
