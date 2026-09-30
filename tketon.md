@@ -156,7 +156,7 @@ kubectl get nodes -o wide
 docker --version    # optional, only needed for local testing
 helm version
 git --version
-curl –version
+curl --version
 ```
 
 ## Installation of Tekton on VKS – Internet Connected VKS
@@ -310,7 +310,7 @@ Tekton creates Kubernetes Custom Resource Definitions.
 Run:
 
 ```
-kubectl get crd | Select-String tekton
+kubectl get crd | grep tekton
 ```
 
 You should see resources related to:
@@ -2979,7 +2979,7 @@ spec:
         echo "Git commit created."
         echo "Changes pushed to GitHub."
 
- ```       
+```
 
 ## Create the git-clone Task
 
@@ -2990,7 +2990,7 @@ kubectl apply -f git-clone.yaml
 Check:
 
 ```
-kubectl get task git-clone -n cicd
+kubectl get task git-clone-update -n cicd
 ```
 
 Create the BuildKit Task
@@ -3087,7 +3087,7 @@ spec:
         - name: revision
           value: "$(params.REVISION)"
         - name: deleteExisting
-          value: "true"build
+          value: "true"
       workspaces:
         - name: output
           workspace: source
@@ -3229,7 +3229,7 @@ kubectl get pipeline -n cicd
 Expected:
 
 ```
-travelportal-pipeline
+travelportal-pipeline-values-update
 ```
 
 Pipeline design
@@ -3373,7 +3373,7 @@ kubectl get pipelinerun -n cicd
 Expected:
 
 ```
-travelportal-pipelinerun
+travelportal-build-xxxxx
 ```
 
 Watch PipelineRun
@@ -3586,6 +3586,7 @@ RoleBinding           github-trigger-rolebinding
 ClusterRole           github-trigger-cluster-role
 ClusterRoleBinding    github-trigger-cluster-rolebinding
 EventListener         travelportal-github-listener
+CEL interceptor       ClusterInterceptor
 TriggerBinding        travelportal-github-binding
 TriggerTemplate       travelportal-github-template
 ```
@@ -3635,7 +3636,9 @@ serviceAccountName: github-trigger-sa
 
 It needs permission to read the Triggers resources in cicd, read the cluster-scoped Triggers resources (`clusterinterceptors`, `clustertriggerbindings`), and create PipelineRuns.
 
-Create github-trigger-rbac.yaml
+Create the ServiceAccount
+
+webhook-sa.yaml:
 
 ```
 apiVersion: v1
@@ -3643,7 +3646,19 @@ kind: ServiceAccount
 metadata:
   name: github-trigger-sa
   namespace: cicd
----
+```
+
+Apply:
+
+```
+kubectl apply -f webhook-sa.yaml
+```
+
+Create Role (RBAC)
+
+github-trigger-rbac.yaml:
+
+```
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -3670,7 +3685,19 @@ rules:
       - get
       - list
       - watch
----
+```
+
+Apply:
+
+```
+kubectl apply -f github-trigger-rbac.yaml
+```
+
+Create RoleBinding (RBAC)
+
+github-trigger-rolebinding.yaml:
+
+```
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -3684,7 +3711,19 @@ roleRef:
   kind: Role
   name: github-trigger-role
   apiGroup: rbac.authorization.k8s.io
----
+```
+
+Apply:
+
+```
+kubectl apply -f github-trigger-rolebinding.yaml
+```
+
+Create cluster Role (RBAC)
+
+clusterrole.yaml
+
+```
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -3698,7 +3737,19 @@ rules:
       - get
       - list
       - watch
----
+```
+
+Apply:
+
+```
+kubectl apply -f clusterrole.yaml
+```
+
+Create ClusterRoleBinding
+
+github-trigger-cluster-rbac.yaml:
+
+```
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -3716,7 +3767,7 @@ roleRef:
 Apply:
 
 ```
-kubectl apply -f github-trigger-rbac.yaml
+kubectl apply -f github-trigger-cluster-rbac.yaml
 ```
 
 Verify the objects:
@@ -3757,10 +3808,6 @@ Expected for all of them:
 yes
 ```
 
-Do not grant `pods:create` to this ServiceAccount. The Deployment/ReplicaSet controller creates the EventListener pod.
-
-Allow the repository webhook to call the cluster
-
 By default the repository server blocks outbound webhook calls to hosts that are not on its allow list. Without the change below, the webhook fails with:
 
 ```
@@ -3768,20 +3815,9 @@ webhook can only call allowed HTTP servers
 (check your security.ALLOWED_HOST_LIST setting)
 ```
 
-Add the repository server IP and the Kubernetes node IP to the `[security]` section of the repository server configuration (`app.ini`), then wait until the repository server rollout completes:
-
-```
-[security]
-ALLOWED_HOST_LIST = 10.12.90.62,10.12.92.3
-```
-
-Confirm the value is present in the running server's `app.ini` before testing the webhook.
-
 Create the TriggerBinding
 
-The TriggerBinding reads values from the push payload. The repository URL is fixed for this lab.
-
-Create triggerbinding.yaml
+github-trigger-binding.yaml
 
 ```
 apiVersion: triggers.tekton.dev/v1beta1
@@ -3807,7 +3843,7 @@ spec:
 Apply:
 
 ```
-kubectl apply -f triggerbinding.yaml
+kubectl apply -f github-trigger-binding.yaml
 ```
 
 Verify:
@@ -3825,9 +3861,7 @@ REVISION = main
 
 Create the TriggerTemplate
 
-The TriggerTemplate creates the PipelineRun. It uses the same Pipeline, builder image, PVC and secrets as the manual PipelineRun above.
-
-Create triggertemplate.yaml
+github-trigger-template.yaml
 
 ```
 apiVersion: triggers.tekton.dev/v1beta1
@@ -3838,18 +3872,11 @@ metadata:
 spec:
   params:
     - name: REPO_URL
-      description: Git repository URL
-
     - name: REVISION
-      description: Git branch
       default: main
-
     - name: COMMIT_MESSAGE
-      description: Git commit message
       default: Repository push - TravelPortal build
-
     - name: COMMIT_SHA
-      description: Git commit SHA
 
   resourcetemplates:
     - apiVersion: tekton.dev/v1
@@ -3859,23 +3886,17 @@ spec:
       spec:
         pipelineRef:
           name: travelportal-pipeline-values-update
-
         params:
           - name: REPO_URL
             value: $(tt.params.REPO_URL)
-
           - name: REVISION
             value: $(tt.params.REVISION)
-
           - name: IMAGE
             value: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-
           - name: BUILDER_IMAGE
             value: paketobuildpacks/builder-jammy-base
-
         taskRunTemplate:
           serviceAccountName: default
-
         taskRunSpecs:
           - pipelineTaskName: buildkit
             podTemplate:
@@ -3883,19 +3904,15 @@ spec:
                 - name: harbor-ca
                   configMap:
                     name: harbor-ca-cert
-
         timeouts:
           pipeline: 1h0m0s
-
         workspaces:
           - name: source
             persistentVolumeClaim:
               claimName: buildpacks-source-pvc
-
           - name: dockerconfig
             secret:
               secretName: harbor-registry-secret
-
           - name: cosign-key
             secret:
               secretName: cosign-key
@@ -3904,7 +3921,7 @@ spec:
 Apply:
 
 ```
-kubectl apply -f triggertemplate.yaml
+kubectl apply -f github-trigger-template.yaml
 ```
 
 Verify:
@@ -3917,7 +3934,7 @@ The PipelineRun must reference `travelportal-pipeline-values-update` and pass th
 
 Create the EventListener
 
-Create eventlistener.yaml
+github-eventlistener.yaml
 
 ```
 apiVersion: triggers.tekton.dev/v1beta1
@@ -3943,7 +3960,8 @@ spec:
           params:
             - name: filter
               value: >-
-                body.ref == 'refs/heads/main'
+                body.ref == 'refs/heads/main' &&
+                !body.head_commit.message.startsWith('ci: update TravelPortal image digest')
 
       bindings:
         - ref: travelportal-github-binding
@@ -3955,7 +3973,7 @@ spec:
 Apply:
 
 ```
-kubectl apply -f eventlistener.yaml
+kubectl apply -f github-eventlistener.yaml
 ```
 
 Verify:
@@ -3971,18 +3989,19 @@ AVAILABLE=True
 READY=True
 ```
 
+Verify the CEL ClusterInterceptor
+
+The EventListener uses the cluster-scoped `cel` interceptor. Verify that it is available:
+
+```
+kubectl get clusterinterceptors
+kubectl get clusterinterceptor cel -o yaml
+```
+
 Check the generated Service:
 
 ```
 kubectl get svc el-travelportal-github-listener -n cicd
-```
-
-Working lab result:
-
-```
-TYPE: NodePort
-8080:31877/TCP
-9000:32312/TCP
 ```
 
 The webhook must use the application port 8080, which is mapped to 31877, so the webhook URL is:
@@ -3991,21 +4010,19 @@ The webhook must use the application port 8080, which is mapped to 31877, so the
 http://10.12.92.3:31877
 ```
 
-Do not use 32312 for the webhook. Always read the real NodePort from the Service, because the generated port is authoritative.
-
-Test the EventListener before adding the webhook
-
 Check the Service endpoint and the EventListener pod:
 
 ```
 kubectl get endpoints el-travelportal-github-listener -n cicd -o wide
+```
 
+```
 kubectl get pods -n cicd \
   -l eventlistener=travelportal-github-listener \
   -o wide
 ```
 
-The endpoint should show the EventListener pod on port `:8080`.
+Test the EventListener before adding the webhook
 
 Test the NodePort:
 
@@ -4077,8 +4094,6 @@ body.after
 body.head_commit.message
 ```
 
-The EventListener does not need the GitHub interceptor for this setup.
-
 Pipeline changes for automatic runs
 
 Image digest
@@ -4096,24 +4111,9 @@ Both Tasks also write the same file to the shared workspace:
 $(workspaces.source.path)/image-digest
 ```
 
-The sign Task reads this file and exposes it as `IMAGE_DIGEST`, so the same value reaches update-values whichever branch ran. Do not reference `$(tasks.buildkit.results.IMAGE_DIGEST)` directly downstream, because that result does not exist when the Buildpacks branch is used.
-
-The sign Task must have every workspace it references bound in the Pipeline. Its `source` workspace is bound like this:
-
-```
-- name: source
-  workspace: source
-```
-
-If it is missing, the run fails with:
-
-```
-declared workspace "source" is required but has not been bound
-```
-
 Repository credentials for update-values
 
-Create a Personal Access Token in the repository server and store it as a Secret. Do not put the token in the Pipeline YAML.
+Create a Personal Access Token in the repository server and store it as a Secret.
 
 ```
 kubectl create secret generic repo-git-credentials \
@@ -4138,108 +4138,6 @@ env:
         name: repo-git-credentials
         key: token
 ```
-
-Repository remote
-
-Do not hard-code the repository URL in update-values. Build the remote from the Pipeline parameter so the CI push goes to the same repository that triggered the run:
-
-```
-REPO_URL="$(params.REPO_URL)"
-REPO_WITHOUT_SCHEME="${REPO_URL#http://}"
-REPO_WITHOUT_SCHEME="${REPO_WITHOUT_SCHEME#https://}"
-
-git remote set-url origin \
-  "http://${GIT_USERNAME}:${GIT_TOKEN}@${REPO_WITHOUT_SCHEME}"
-```
-
-Handle a rejected push (fetch first)
-
-A CI push can fail with:
-
-```
-! [rejected] main -> main (fetch first)
-```
-
-This happens when another commit reached the repository after the Task cloned it. Never use `git push --force`, because it can overwrite developer commits. Instead fetch, reset, re-apply the `values.yaml` change, then commit and push:
-
-```
-git fetch origin main
-git reset --hard origin/main
-```
-
-Prevent the CI feedback loop
-
-Without a filter, the pipeline triggers itself:
-
-```
-Developer push
-   |
-   v
-Pipeline runs
-   |
-   v
-update-values pushes values.yaml
-   |
-   v
-Repository webhook fires
-   |
-   v
-Pipeline runs AGAIN
-```
-
-The loop is stopped in the EventListener, not with `.gitignore` (`values.yaml` is already tracked, so ignoring it changes nothing).
-
-Give the CI commit a fixed message. In update-values, commit with:
-
-```
-git commit -m "ci: update TravelPortal image digest"
-```
-
-Then replace the CEL filter in eventlistener.yaml with:
-
-```
-interceptors:
-  - ref:
-      apiVersion: triggers.tekton.dev
-      kind: ClusterInterceptor
-      name: cel
-    params:
-      - name: filter
-        value: >-
-          body.ref == 'refs/heads/main' &&
-          !body.head_commit.message.startsWith('ci: update TravelPortal image digest')
-```
-
-The commit message produced by update-values must start with exactly `ci: update TravelPortal image digest`, otherwise the filter will not reject the CI commit.
-
-Apply again:
-
-```
-kubectl apply -f eventlistener.yaml
-```
-
-Stronger option: filter on the files changed. The CI commit changes only `helm-charts/values.yaml`, while a developer commit changes application files. This rule uses the `commits[].added`, `modified` and `removed` arrays of the payload:
-
-```
-interceptors:
-  - ref:
-      apiVersion: triggers.tekton.dev
-      kind: ClusterInterceptor
-      name: cel
-    params:
-      - name: filter
-        value: >-
-          body.ref == 'refs/heads/main' &&
-          body.commits.exists(c,
-            c.added.exists(f, f != 'helm-charts/values.yaml') ||
-            c.modified.exists(f, f != 'helm-charts/values.yaml') ||
-            c.removed.exists(f, f != 'helm-charts/values.yaml')
-          )
-```
-
-Test this rule against a real webhook delivery before using it as the final filter.
-
-Trigger the pipeline with a push
 
 The developer does not create a PipelineRun manually:
 
@@ -4288,14 +4186,4 @@ Direct POST     → HTTP/1.1 202 Accepted
 Webhook target  → http://10.12.92.3:31877
 ```
 
-Troubleshooting
-
-| Problem | Cause | Fix |
-|---|---|---|
-| `serviceaccount "github-trigger-sa" not found` | RBAC file not applied | `kubectl apply -f github-trigger-rbac.yaml` |
-| `github-trigger-sa cannot list triggertemplates` | Missing Role or ClusterRole permission | Fix the Role/ClusterRole, then re-run the `can-i` checks |
-| `webhook can only call allowed HTTP servers` (Response 0 in the repository) | Node IP is not in `ALLOWED_HOST_LIST` | Add `10.12.92.3` and restart the repository server |
-| `Connection refused` | Wrong NodePort | Read the port from `kubectl get svc el-travelportal-github-listener -n cicd`; use `8080:31877`, not an old port such as 31878 |
-| 202 returned but no PipelineRun | CEL filter, binding, template or permission error | Check `kubectl logs deployment/el-travelportal-github-listener -n cicd`, then dump the binding, template and EventListener with `-o yaml` and compare the filter with the real payload |
-| update-values push rejected (fetch first) | A newer commit reached the repository | `git fetch origin main` and `git reset --hard origin/main`, re-apply the change; never force push |
 | Pipeline triggers itself repeatedly | CI commit message does not match the CEL filter | Commit with `ci: update TravelPortal image digest` and re-apply the EventListener |
