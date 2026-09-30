@@ -893,13 +893,17 @@ Label the namespace:
 ```
 kubectl label namespace cicd pod-security.kubernetes.io/enforce=privileged --overwrite
 ```
+ ## Build Installtion 
+ 
+ ### Tools
+ 
+Buildpacks: Phases Task	A ready-made Tekton Task that builds an image from source code.	Builds the image when there is no Dockerfile.
 
-## Install Buildpacks Phases Task
-
-This is the main Buildpacks installation step for Tekton. The current Buildpacks documentation points to Buildpacks Phases Task 0.3.
-
+BuildKit:	A tool that builds an image from a Dockerfile. Builds the image when a Dockerfile exists.
+ 
+### Buildpacks Install
+  
 Create buildpacks-phases.yaml
-
 ```
 apiVersion: tekton.dev/v1
 kind: Task
@@ -918,12 +922,12 @@ spec:
     The Buildpacks-Phases task builds source into a container image and pushes it to
     a registry, using Cloud Native Buildpacks - https://buildpacks.io/. This task separately calls the aspects of the
     Cloud Native Buildpacks lifecycle, to provide increased security via container isolation.
-
+ 
     When the builder image includes extensions (= Dockerfiles), then this task will execute them.
     That allows to by example install packages, rpm, etc and to customize the build process according to your needs.
-
+ 
     This task supports the Platform spec 0.13: https://github.com/buildpacks/spec/blob/platform/v0.13/platform.md
-
+ 
   workspaces:
     - name: source
       description: Directory where application source is located.
@@ -933,7 +937,7 @@ spec:
     - name: dockerconfig
       description: Docker config for registry authentication.   # ✅ add this
       optional: true
-
+ 
   params:
     - name: CNB_BUILD_IMAGE
       description: Reference to the current build image in an OCI registry (if used <kaniko-dir> must be provided)
@@ -989,7 +993,7 @@ spec:
     - name: CNB_USER_ID
       description: The user ID of the builder image user.
       default: ""
-
+ 
     - name: APP_IMAGE
       description: The name of the container image for your application.
     - name: SOURCE_SUBPATH
@@ -1004,11 +1008,11 @@ spec:
     - name: INSPECT_TOOLS_IMAGE
       description: Image packaging tools like skopeo and jq to inspect the builder images
       default: quay.io/halkyonio/skopeo-jq:0.1.3@sha256:1b3d21ad541227dc9d3e793d18cef9eb00a969c0c01eb09cab88997bc63680c6
-
+ 
   results:
     - name: APP_IMAGE_DIGEST
       description: The digest of the built `APP_IMAGE`.
-
+ 
   stepTemplate:
     env:
       - name: CNB_EXPERIMENTAL_MODE
@@ -1042,7 +1046,7 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -eu
-
+ 
         if [ "${PARAM_VERBOSE}" = "debug" ] ; then
           set -x
         fi
@@ -1060,16 +1064,16 @@ spec:
         else
           printf %"s\n" "!!!!! Warning: No registry credentials file exist. So it could be possible that the task will fail due to docker rate limit, etc !!!"
         fi
-
+ 
         printf %"s\n" "Remove the @sha from the image as not supported by skopeo to inspect an image"
         CLEANED_IMAGE="${PARAM_BUILDER_IMAGE%@*}"
-
+ 
         EXT_LABEL_1="io.buildpacks.extension.layers"
         EXT_LABEL_2="io.buildpacks.buildpack.order-extensions"
         BUILDER_LABEL="io.buildpacks.builder.metadata"
-
+ 
         IMG_MANIFEST=$(skopeo inspect --authfile $HOME/.docker/config.json "docker://${CLEANED_IMAGE}")
-
+ 
         #
         # The following test should be reviewed as :
         #
@@ -1079,20 +1083,20 @@ spec:
         # 2) Do we have to check the content of this label too ?
         #    "io.buildpacks.buildpack.order-extensions": "null",
         #
-
+ 
         IMG_LABELS=$(echo $IMG_MANIFEST | jq -e '.Labels')
-
+ 
         if [[ $(echo "$IMG_LABELS" | jq -r '.["'${BUILDER_LABEL}'"]') != "{}" ]] > /dev/null; then
           printf %"s\n" "## The builder image ${PARAM_BUILDER_IMAGE} includes the label: \"${BUILDER_LABEL}\" :"
-
+ 
           builderLabel=$(echo -n "$IMG_LABELS" | jq -r '.["'${BUILDER_LABEL}'"]')
           platforms=($(echo $builderLabel | jq -r '.lifecycle.apis.platform.supported'))
           printf %"s\n" "Lifecycle platforms API supported: ${platforms[@]}"
-
+ 
           CNB_PLATFORM_API=${PARAM_CNB_PLATFORM_API:-$PARAM_CNB_PLATFORM_API_SUPPORTED}
           echo "Platform API selected: $CNB_PLATFORM_API"
           printf %"s\n" "Platform API supported by this task: $PARAM_CNB_PLATFORM_API_SUPPORTED"
-
+ 
           if [[ "${platforms[@]}" =~ "$CNB_PLATFORM_API" && "$CNB_PLATFORM_API" == "$PARAM_CNB_PLATFORM_API_SUPPORTED" ]]; then
               echo -n "$CNB_PLATFORM_API" > "$(step.results.CNB_PLATFORM_API.path)"
               printf %"s\n" "$CNB_PLATFORM_API is in the list of the platform supported by lifecycle like also this Tekton task :-)"
@@ -1101,7 +1105,7 @@ spec:
               exit 1
           fi
         fi
-
+ 
         if [[ $(echo "$IMG_LABELS" | jq -r '.["'${EXT_LABEL_1}'"]') != "{}" ]] > /dev/null; then
           echo "## The builder image ${PARAM_BUILDER_IMAGE} includes some extensions as the extension label \"${EXT_LABEL_1}\" is NOT empty:"
           echo -n "$IMG_LABELS" | jq -r '.["'${EXT_LABEL_1}'"]' | tee "$(step.results.EXTENSION_LABELS.path)"
@@ -1110,15 +1114,15 @@ spec:
           echo "## The builder image ${PARAM_BUILDER_IMAGE} dot not include extensions as the extension label \"${EXT_LABEL_1}\" is empty !"
           echo -n "empty" | tee "$(step.results.EXTENSION_LABELS.path)"
         fi
-
+ 
         CNB_USER_ID=$(echo $IMG_MANIFEST | jq -r '.Env' | jq -r '.[] | select(test("^CNB_USER_ID="))'  | cut -d '=' -f 2)
         CNB_GROUP_ID=$(echo $IMG_MANIFEST | jq -r '.Env' | jq -r '.[] | select(test("^CNB_GROUP_ID="))' | cut -d '=' -f 2)
-
+ 
         echo "## The CNB_USER_ID & CNB_GROUP_ID defined within the builder image: ${PARAM_BUILDER_IMAGE} are:"
         echo -n "$CNB_USER_ID"  | tee "$(step.results.UID.path)"
         echo ""
         echo -n "$CNB_GROUP_ID" | tee "$(step.results.GID.path)"
-
+ 
     - name: prepare
       image: registry.access.redhat.com/ubi8/ubi-minimal@sha256:b2a1bec3dfbc7a14a1d84d98934dfe8fdde6eb822a211286601cf109cbccb075
       args:
@@ -1132,23 +1136,23 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -eu
-
+ 
         echo "CNB UID: $CNB_USER_ID"
         echo "CNB GID: $CNB_GROUP_ID"
-
+ 
         if [[ "$(workspaces.cache.bound)" == "true" ]]; then
           echo "--> Setting permissions on '$(workspaces.cache.path)'..."
           chown -R "$CNB_USER_ID:$CNB_GROUP_ID" "$(workspaces.cache.path)"
         fi
-
+ 
         echo "--> Creating .docker folder"
         mkdir -p "/tekton/home/.docker"
-
+ 
         for path in "/tekton/home" "/tekton/home/.docker" "/tekton/creds" "/layers" "$(workspaces.source.path)"; do
           echo "--> Setting permissions on '$path'..."
           chown -R "$CNB_USER_ID:$CNB_GROUP_ID" "$path"
         done
-
+ 
         echo "--> Parsing additional configuration..."
         parsing_flag=""
         envs=()
@@ -1160,13 +1164,13 @@ spec:
                 envs+=("$arg")
             fi
         done
-
+ 
         echo "--> Processing any environment variables..."
         ENV_DIR="/platform/env"
-
+ 
         echo "--> Creating 'env' directory: $ENV_DIR"
         mkdir -p "$ENV_DIR"
-
+ 
         for env in "${envs[@]}"; do
             IFS='=' read -r key value string <<< "$env"
             if [[ "$key" != "" && "$value" != "" ]]; then
@@ -1177,16 +1181,16 @@ spec:
         done
         echo "--> Content of $(params.CNB_PLATFORM_DIR)/env"
         ls -la $(params.CNB_PLATFORM_DIR)/env
-
+ 
         echo "--> Show the project cloned within the workspace ..."
         ls -la $(workspaces.source.path)/$(params.SOURCE_SUBPATH)
-
+ 
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
         - name: platform-dir
           mountPath: $(params.CNB_PLATFORM_DIR)
-
+ 
     - name: analyze
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1208,7 +1212,7 @@ spec:
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
-
+ 
     - name: detect
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1230,7 +1234,7 @@ spec:
           mountPath: $(params.CNB_PLATFORM_DIR)
         - name: tekton-home-dir
           mountPath: /tekton/home
-
+ 
     - name: restore
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1272,7 +1276,7 @@ spec:
           mountPath: /layers
         - name: kaniko-dir
           mountPath: /kaniko
-
+ 
     - name: extender
       when:
         - input: $(steps.get-labels-and-env.results.EXTENSION_LABELS)
@@ -1307,7 +1311,7 @@ spec:
           mountPath: /tekton/home
         - name: platform-dir
           mountPath: $(params.CNB_PLATFORM_DIR)
-
+ 
     - name: build
       when:
         - input: $(steps.get-labels-and-env.results.EXTENSION_LABELS)
@@ -1333,7 +1337,7 @@ spec:
           mountPath: $(params.CNB_PLATFORM_DIR)
         - name: tekton-home-dir
           mountPath: /tekton/home
-
+ 
     - name: export
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1357,47 +1361,41 @@ spec:
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
-
+ 
     - name: results
       image: registry.access.redhat.com/ubi8/python-311@sha256:43605cb2491ef2297a7acf4b4bf0b7f54f0c91b96daf12ae41c49cc7f192b153
       script: |
         #!/usr/bin/env python3
-
+ 
         import tomllib
-
+ 
         def write_to_file(filename, content):
           with open(filename, "w") as f:
             f.write(content)
-
+ 
         with open("/layers/report.toml", "rb") as f:
             data = tomllib.load(f)
-
+ 
         img_data = data.get("image")
-
+ 
         tags = img_data.get("tags")
         digest = img_data.get("digest")
         image_id = img_data.get("image_id")
         manifest_size = img_data.get("manifest_size")
-
+ 
         print("#### Image data ####")
         print(f"tags: {tags}")
         print(f"Digest: {digest}")
-
+ 
         if None not in (image_id, manifest_size):
           print(f"image container id (when using daemon): {image_id}, manifest size: {manifest_size}")
-
+ 
         write_to_file('$(results.APP_IMAGE_DIGEST.path)',digest)
-
-        # Also write digest to the shared source workspace
-        with open("$(workspaces.source.path)/image-digest", "w") as f:
-            f.write(digest)
-
-        print(f"Digest written to $(workspaces.source.path)/image-digest")
-
+ 
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
-
+ 
   volumes:
     - name: tekton-home-dir
       emptyDir: {}
@@ -1409,362 +1407,23 @@ spec:
       emptyDir: {}
 
 ```
-save:
+apply:
 
 ```
 kubectl apply -f buildpacks-phases.yaml -n cicd
 ```
 
-You should get:
-
+Verify the Buildpacks Task
+```
+kubectl get task buildpacks-phases -n cicd
+```
 ```
 task.tekton.dev/buildpacks-phases created
 ```
 
-Verify the Buildpacks Task
+### Install BuildKit
 
-Run:
-
-```
-kubectl get task -n cicd
-```
-
-Check all namespaces:
-
-```
-kubectl get task -A | grep buildpacks
-```
-
-You should find:
-
-```
-buildpacks-phases
-```
-
-For application Pipeline in cicd, recommend to have the Task available in cicd.
-
-Understand what was installed
-
-This is important.
-
-You did not install:
-
-```
-Buildpack server
-Buildpack controller
-Buildpack operator
-```
-
-Instead, you installed a Tekton Task:
-
-```
-buildpacks-phases
-```
-
-That Task invokes CNB lifecycle phases such as:
-
-```
-prepare
-   ↓
-analyze
-   ↓
-detect
-   ↓
-restore
-   ↓
-build
-   ↓
-export
-```
-
-The official documentation explicitly describes the Buildpacks Phases Task as running these lifecycle binaries in separate containers.
-
-Check Task parameters
-
-This is the next important step.
-
-Run:
-
-```
-kubectl describe task buildpacks-phases -n cicd
-```
-
-Look for parameters such as:
-
-```
-APP_IMAGE
-SOURCE_SUBPATH
-CNB_BUILDER_IMAGE
-CNB_ENV_VARS
-```
-
-The official example uses:
-
-```
-APP_IMAGE
-SOURCE_SUBPATH
-CNB_BUILDER_IMAGE
-CNB_ENV_VARS
-```
-
-with the builder supplied at PipelineRun time.
-
-Your builder image
-
-For your requirement, we will use:
-
-```
-paketobuildpacks/builder-jammy-base
-```
-
-So your PipelineRun will eventually contain:
-
-```
-- name: builder
-  value: paketobuildpacks/builder-jammy-base
-```
-
-The builder is what provides the lifecycle/buildpacks environment used to build your application. CNB describes a builder as the input used by a platform to orchestrate a build.
-
-Pull the builder image manually first
-
-Before creating the complete Pipeline, let's make sure the VKS nodes can pull the builder.
-
-The exact image is:
-
-```
-paketobuildpacks/builder-jammy-base
-```
-
-Create a simple test Pod:
-
-```
-apiVersion: v1
-kind: Pod
-metadata:
-  name: buildpack-builder-test
-  namespace: cicd
-spec:
-  restartPolicy: Never
-  containers:
-    - name: builder
-      image: paketobuildpacks/builder-jammy-base
-      command:
-        - /bin/sh
-        - -c
-        - |
-          echo "Buildpack builder image pulled successfully"
-          sleep 30
-```
-
-Save it as: buildpack-builder-test.yaml
-
-Apply:
-
-```
-kubectl apply -f buildpack-builder-test.yaml
-```
-
-Check the test Pod
-
-Run:
-
-```
-kubectl get pod buildpack-builder-test -n cicd
-```
-
-You want:
-
-```
-STATUS
-Running
-```
-
-or eventually:
-
-```
-Completed
-```
-
-Check:
-
-```
-kubectl logs buildpack-builder-test -n cicd
-```
-
-Expected:
-
-```
-Buildpack builder image pulled successfully
-```
-
-If you get ImagePullBackOff
-
-Run:
-
-```
-kubectl describe pod buildpack-builder-test -n cicd
-```
-
-Look at: Events:
-
-If you see:
-
-```
-Failed to pull image
-```
-
-then the issue is not Tekton. It is your VKS worker → Docker Hub connectivity.
-
-This test is important before we proceed.
-
-Delete the test Pod
-
-After successful testing:
-
-```
-kubectl delete pod buildpack-builder-test -n cicd
-```
-
-Create PVC for Buildpacks
-
-The official Buildpacks/Tekton guide uses a PVC to store the cloned source and buildpack working files. Its example uses 500Mi; for your actual application, I recommend starting larger.
-
-Since your VKS environment already has vSphere CSI storage, first check:
-
-as your default StorageClass.
-
-Check:
-
-```
-kubectl get storageclass
-```
-
-Look for the storageclass which is available:
-
-```
-csi.vsphere.vmware.com
-```
-
-Create Buildpack PVC
-
-Create: buildpacks-source-pvc.yaml
-
-Use:
-
-```
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: buildpacks-source-pvc
-  namespace: cicd
-spec:
-  accessModes:
-    - ReadWriteOnce
-  storageClassName: lab-gold-storage-policy-latebinding
-  resources:
-    requests:
-      storage: 1Gi
-```
-
-Save it as: buildpacks-source-pvc.yaml
-
-and apply:
-
-```
-kubectl apply -f buildpacks-source-pvc.yaml
-```
-
-Then:
-
-```
-kubectl get pvc -n cicd -w
-```
-
-Wait until:
-
-```
-buildpacks-source-pvc   Bound
-```
-
-Create the ServiceAccount
-
-```
-kubectl create serviceaccount buildpacks-service-account -n cicd
-
-kubectl get sa buildpacks-service-account -n cicd
-```
-
-Expected:
-
-```
-NAME                       SECRETS   AGE
-buildpacks-service-account  0         ...
-```
-
-Create Registry Secret Since you're pushing to Harbor, create Harbor authentication
-
-```
-VKS
-|
-v
-Buildpacks
-|
-v
-harbor.company.local/devops/myapp
-```
-
-Your Harbor URL appears to be:
-
-```
-lab25-harbor.lab25.sunfire.lab
-```
-
-You need a Docker registry secret in cicd.
-
-Run:
-
-```
-kubectl create secret docker-registry harbor-registry-secret \
-  --docker-server=lab25-harbor.lab25.sunfire.lab \
-  --docker-username='<HARBOR_USERNAME>' \
-  --docker-password='<HARBOR_PASSWORD>' \
-  -n cicd
-```
-
-verify:
-
-```
-kubectl get secret harbor-registry-secret -n cicd
-```
-
-Attach Harbor secret to the ServiceAccount
-
-Run:
-
-```
-kubectl patch serviceaccount buildpacks-service-account \
-  -n cicd \
-  -p '{"imagePullSecrets":[{"name":"harbor-registry-secret"}]}'
-```
-
-Verify:
-
-```
-kubectl get sa buildpacks-service-account -n cicd -o yaml
-```
-
-You should see:
-
-```
-imagePullSecrets:
-  - name: harbor-registry-secret
-```
-
-## Install BuildKit
-
-We can use:
-
+create  
 ```
 moby/buildkit:latest
 ```
