@@ -895,13 +895,178 @@ kubectl label namespace cicd pod-security.kubernetes.io/enforce=privileged --ove
 ```
  # Tasks
  
- ## Buildpacks and BuildKit Installtion 
+ # Task creation 
+
+### Git-Clone update task 
+git-clone-update is a Tekton Task used to clone source code from a Git repository into a shared workspace.
+It cleans the workspace, clones the required branch/revision, and validates the Git repository.
+The cloned source code is then used by BuildKit or Buildpacks to build the container image.
+
+### create git-clone-update-task.yaml
+```
+apiVersion: tekton.dev/v1
+kind: Task
+
+metadata:
+  name: git-clone-update
+  namespace: cicd
+
+spec:
+  description: Clone a Git repository
+
+  params:
+    - description: Git repository URL
+      name: url
+      type: string
+
+    - default: main
+      description: Git branch, tag, or commit
+      name: revision
+      type: string
+
+    - default: "true"
+      description: Delete existing workspace contents
+      name: deleteExisting
+      type: string
+
+  steps:
+    - computeResources: {}
+      image: alpine/git:latest
+      name: clone
+
+      script: |
+        #!/bin/sh
+        set -eu
+
+        WORKSPACE="$(workspaces.output.path)"
+
+        echo "========================================"
+        echo "Git Clone"
+        echo "========================================"
+        echo "Workspace: ${WORKSPACE}"
+        echo "Repository: $(params.url)"
+        echo "Revision:   $(params.revision)"
+        echo ""
+
+        echo "Cleaning workspace..."
+        rm -rf "${WORKSPACE}"/*
+        rm -rf "${WORKSPACE}"/.[!.]*
+        rm -rf "${WORKSPACE}"/..?*
+
+        echo "Cloning repository..."
+        git clone \
+          --branch "$(params.revision)" \
+          --depth 1 \
+          "$(params.url)" \
+          "${WORKSPACE}"
+
+        echo "========================================"
+        echo "Repository cloned successfully"
+        echo "========================================"
+
+        echo "Repository contents:"
+        ls -la "${WORKSPACE}"
+
+        echo ""
+        echo "========================================"
+        echo "Configuring Git safe.directory"
+        echo "========================================"
+
+        git config --global --add safe.directory "${WORKSPACE}"
+
+        echo "safe.directory configured:"
+        git config --global --get-all safe.directory
+
+        echo ""
+        echo "========================================"
+        echo "Git status"
+        echo "========================================"
+
+        cd "${WORKSPACE}"
+        git status
+
+        echo ""
+        echo "========================================"
+        echo "Git Clone Completed"
+        echo "========================================"
+
+  workspaces:
+    - description: Workspace where the Git repository will be cloned
+      name: output
+```
+apply:
+```
+kubectl apply -f git-clone-update-task.yaml
+```
+verify:
+```
+kubectl get task git-clone-update -n cicd
+```
+
+### detect-build-type task 
+
+detect-build-type is a Tekton Task that checks whether the source repository contains a Dockerfile.
+It selects BuildKit when a Dockerfile exists, otherwise it selects Cloud Native Buildpacks.
+The selected build type is stored as a Tekton result for the next pipeline task to use.
+
+### detect-build-type
+
+Create detect-build-type.yaml
+```
+piVersion: tekton.dev/v1
+kind: Task
+
+metadata:
+  name: detect-build-type
+  namespace: cicd
+
+spec:
+  workspaces:
+    - name: source
+
+  results:
+    - name: BUILD_TYPE
+      description: Build type: buildkit or buildpack
+
+  steps:
+    - name: detect
+      image: alpine:3.20
+
+      script: |
+        #!/bin/sh
+        set -eu
+
+        echo "Checking source repository..."
+
+        cd "$(workspaces.source.path)"
+
+        if [ -f Dockerfile ]; then
+          echo "Dockerfile found."
+          echo "Using BuildKit."
+
+          printf "buildkit" > "$(results.BUILD_TYPE.path)"
+        else
+          echo "Dockerfile not found."
+          echo "Using Buildpacks."
+
+          printf "buildpack" > "$(results.BUILD_TYPE.path)"
+        fi
+```
+apply:
+
+```
+kubectl apply -f detect-build-type-task.yaml
+```
+verify:
+```
+kubectl get task detect-build-type -n cicd
+```
+ 
+## Buildpacks Task 
 
 Buildpacks:  Phases Task	A ready-made Tekton Task that builds an image from source code.	Builds the image when there is no Dockerfile.
 
-BuildKit:	 A tool that builds an image from a Dockerfile. Builds the image when a Dockerfile exists.
-
-### Buildpacks 
+### Buildpacks-phases
   
 Create buildpacks-phases.yaml
 ```
@@ -1408,473 +1573,103 @@ spec:
 
 ```
 apply:
-
 ```
 kubectl apply -f buildpacks-phases.yaml -n cicd
 ```
 
-Verify the Buildpacks Task
+Verify:
 ```
 kubectl get task buildpacks-phases -n cicd
 ```
-```
-task.tekton.dev/buildpacks-phases created
-```
 
-### Install BuildKit
 
-create  
-```
-moby/buildkit:latest
-```
+### Install BuildKit Task
 
-This gives you:
+buildkit-build is a Tekton Task that runs when detect-build-type detects a Dockerfile, using BuildKit to build the application container image.
+It takes the source code from the shared workspace, builds the image from the Dockerfile, and pushes it to Harbor with the configured credentials.
 
-```
-Tekton Pod
-   |
-   +-- BuildKit container
-          |
-          +-- buildkitd
-          |
-          +-- buildctl
-```
+buildkit-build
 
-Test BuildKit image pull
-
-Before creating the Task, test:
-
-```
-kubectl run buildkit-test \
-  -n cicd \
-  --image=moby/buildkit:latest \
-  --restart=Never \
-  --command -- \
-  buildctl --version
-
-kubectl get pod buildkit-test -n cicd
-```
-
-Then:
-
-```
-kubectl logs buildkit-test -n cicd
-```
-
-You should get BuildKit version information.
-
-Delete:
-
-```
-kubectl delete pod buildkit-test -n cicd
-```
-
-BuildKit requires privileged execution
-
-This is important for your VKS cluster.
-
-The BuildKit step will need:
-
-```
-securityContext:
-  privileged: true
-```
-
-## Install Cosign
-
-Check your jumpbox OS
-
-Run:
-
-```
-cat /etc/os-release
-uname -m
-```
-
-If this is a RHEL/Rocky/Alma/CentOS-type/Photon-linux system, the simplest approach is to download the official Cosign binary.
-
-First check the latest release from the official Sigstore repository:
-
-Cosign releases
-
-For an x86_64/amd64 machine, you can use:
-
-```
-cd /tmp
-
-curl -LO https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64
-
-chmod +x cosign-linux-amd64
-
-mv cosign-linux-amd64 /usr/local/bin/cosign
-```
-
-Then verify:
-
-```
-cosign version
-```
-
-Generate the key pair
-
-Now run:
-
-```
-cosign generate-key-pair
-```
-
-It will create:
-
-```
-cosign.key
-cosign.pub
-```
-
-Verify:
-
-```
-ls -l cosign.key cosign.pub
-```
-
-Protect the private key
-
-Very important:
-
-```
-chmod 600 cosign.key
-```
-
-Create the Kubernetes secret
-
-From the directory containing the two files:
-
-```
-kubectl create secret generic cosign-key \
-  -n cicd \
-  --from-file=cosign.key=cosign.key \
-  --from-file=cosign.pub=cosign.pub
-```
-
-Verify:
-
-```
-kubectl get secret cosign-key -n cicd
-```
-
-You should see:
-
-```
-NAME         TYPE     DATA   AGE
-cosign-key   Opaque   2      ...
-```
-
-Important for your Tekton setup
-
-do not need to install Cosign on every VKS node.
-
-Your architecture should be:
-
-```
-Jumpbox
-   |
-   | cosign generate-key-pair
-   |
-   +---- cosign.key
-   +---- cosign.pub
-              |
-              v
-       Kubernetes Secret
-          cosign-key
-              |
-              v
-        Tekton Task
-              |
-              v
-   ghcr.io/sigstore/cosign/...
-              |
-              v
-           Harbor
-```
-
-SBOM generation
-
-recommend using:
-
-```
-anchore/syft
-```
-
-The flow becomes:
-
-```
-BuildKit
-   |
-   v
-Harbor image
-   |
-   v
-Syft
-   |
-   v
-sbom.spdx.json
-```
-
-Then:
-
-```
-Cosign
-   |
-   +---- sign image
-   |
-   +---- attest SBOM
-```
-
-Cosign supports attaching SBOM information through attestations using cosign attest
-
-Create git-clone task
-
-git-clone.yaml
+create buildkit-build-task-update.yaml
 
 ```
 apiVersion: tekton.dev/v1
 kind: Task
-metadata:
-  name: git-clone-update
-  namespace: cicd
 
-spec:
-  description: Clone a Git repository
-
-  params:
-    - description: Git repository URL
-      name: url
-      type: string
-
-    - default: main
-      description: Git branch, tag, or commit
-      name: revision
-      type: string
-
-    - default: "true"
-      description: Delete existing workspace contents
-      name: deleteExisting
-      type: string
-
-  steps:
-    - computeResources: {}
-      image: alpine/git:latest
-      name: clone
-
-      script: |
-        #!/bin/sh
-
-        set -eu
-
-        WORKSPACE="$(workspaces.output.path)"
-
-        echo "========================================"
-        echo "Git Clone"
-        echo "========================================"
-
-        echo "Workspace: ${WORKSPACE}"
-        echo "Repository: $(params.url)"
-        echo "Revision:   $(params.revision)"
-
-        echo ""
-        echo "Cleaning workspace..."
-
-        rm -rf "${WORKSPACE}"/*
-        rm -rf "${WORKSPACE}"/.[!.]*
-        rm -rf "${WORKSPACE}"/..?*
-
-        echo "Cloning repository..."
-
-        git clone \
-          --branch "$(params.revision)" \
-          --depth 1 \
-          "$(params.url)" \
-          "${WORKSPACE}"
-
-        echo "========================================"
-        echo "Repository cloned successfully"
-        echo "========================================"
-
-        echo "Repository contents:"
-
-        ls -la "${WORKSPACE}"
-
-        echo ""
-        echo "========================================"
-        echo "Configuring Git safe.directory"
-        echo "========================================"
-
-        git config --global --add safe.directory "${WORKSPACE}"
-
-        echo "safe.directory configured:"
-        git config --global --get-all safe.directory
-
-        echo ""
-        echo "========================================"
-        echo "Git status"
-        echo "========================================"
-
-        cd "${WORKSPACE}"
-
-        git status
-
-        echo ""
-        echo "========================================"
-        echo "Git Clone Completed"
-        echo "========================================"
-
-  workspaces:
-    - description: Workspace where the Git repository will be cloned
-      name: output
-
-```
-
-create automatic detection Task
-
-detect-build-type.yaml
-
-```
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: detect-build-type
-  namespace: cicd
-
-spec:
-
-  workspaces:
-    - name: source
-
-  results:
-    - name: BUILD_TYPE
-      description: buildkit or buildpack
-
-  steps:
-
-    - name: detect
-      image: alpine:3.20
-
-      script: |
-        #!/bin/sh
-        set -eu
-
-        echo "Checking source repository..."
-
-        cd "$(workspaces.source.path)"
-
-        if [ -f Dockerfile ]; then
-
-          echo "Dockerfile found."
-          echo "Using BuildKit."
-
-          printf "buildkit" > "$(results.BUILD_TYPE.path)"
-
-        else
-
-          echo "Dockerfile not found."
-          echo "Using Buildpacks."
-
-          printf "buildpack" > "$(results.BUILD_TYPE.path)"
-
-        fi
-
-```
-
-Why this detection works
-
-The repository :
-
-https://github.com/skandpurohit/TravelPortal
-
-contains:
-
-```
-Dockerfile
-```
-
-according to the repository itself.
-
-Therefore:
-
-```
-detect-build-type
-       |
-       v
-BUILD_TYPE=buildkit
-```
-
-For another repository without Dockerfile:
-
-```
-BUILD_TYPE=buildpack
-```
-
-Create BuildKit Task
-
-buildkit-build.yaml
-
-```
-apiVersion: tekton.dev/v1
-kind: Task
 metadata:
   name: buildkit-build
   namespace: cicd
+
 spec:
   params:
     - name: IMAGE
       type: string
+
     - name: DOCKERFILE
       type: string
       default: Dockerfile
+
     - name: CONTEXT
       type: string
       default: .
+
   results:
     - name: IMAGE_DIGEST
       description: Digest of the pushed image
       type: string
+
   workspaces:
     - name: source
     - name: dockerconfig
+
   steps:
     - name: build
       image: moby/buildkit:latest
+
       env:
         - name: DOCKER_CONFIG
           value: $(workspaces.dockerconfig.path)
+
       securityContext:
         privileged: true
+
       script: |
         #!/bin/sh
         set -eu
+
         echo "======================================"
         echo "Starting BuildKit build"
         echo "======================================"
+
         echo "IMAGE:"
         echo "$(params.IMAGE)"
+
         echo "DOCKERFILE:"
         echo "$(params.DOCKERFILE)"
+
         echo "CONTEXT:"
         echo "$(params.CONTEXT)"
+
         echo "Checking Dockerfile..."
         test -f "$(workspaces.source.path)/$(params.DOCKERFILE)"
         echo "Dockerfile found."
 
-        # Fetch and trust Harbor CA cert
+        # Fetch and trust Harbor CA certificate
         apk add --no-cache openssl ca-certificates 2>/dev/null || true
-        openssl s_client -connect lab25-harbor.lab25.sunfire.lab:443 \
+
+        openssl s_client \
+          -connect lab25-harbor.lab25.sunfire.lab:443 \
           -showcerts </dev/null 2>/dev/null \
           | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' \
           > /usr/local/share/ca-certificates/harbor-ca.crt
+
         update-ca-certificates 2>/dev/null || true
 
-        # Create docker config with Harbor credentials
+        # Create Docker config with Harbor credentials
         mkdir -p /tmp/dockerconfig
+
         HARBOR_AUTH=$(echo -n "admin:VMware1!" | base64 | tr -d '\n')
+
         cat > /tmp/dockerconfig/config.json <<EOF
         {
           "auths": {
@@ -1884,9 +1679,13 @@ spec:
           }
         }
         EOF
+
         export DOCKER_CONFIG=/tmp/dockerconfig
+
         cd "$(workspaces.source.path)"
+
         echo "Creating BuildKit configuration..."
+
         cat > /tmp/buildkitd.toml <<EOF
         [registry."lab25-harbor.lab25.sunfire.lab"]
           insecure = true
@@ -1894,18 +1693,11 @@ spec:
 
         echo "BuildKit configuration:"
         cat /tmp/buildkitd.toml
+
         echo "Starting BuildKit..."
 
-        #BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" buildctl-daemonless.sh build \
-        #  --frontend dockerfile.v0 \
-        #  --local context="$(workspaces.source.path)/$(params.CONTEXT)" \
-        #  --local dockerfile="$(workspaces.source.path)" \
-        #  --opt filename="$(params.DOCKERFILE)" \
-        #  --output type=image,name="$(params.IMAGE)",push=true,name-canonical=true,registry.insecure=true
-        #echo "BuildKit build completed."
-
-
-        BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" buildctl-daemonless.sh build \
+        BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" \
+        buildctl-daemonless.sh build \
           --frontend dockerfile.v0 \
           --local context="$(workspaces.source.path)/$(params.CONTEXT)" \
           --local dockerfile="$(workspaces.source.path)" \
@@ -1956,59 +1748,32 @@ spec:
 
         printf '%s' "${IMAGE_DIGEST}" > "$(results.IMAGE_DIGEST.path)"
 
-        printf '%s' "${IMAGE_DIGEST}" > "$(workspaces.source.path)/image-digest"
+        printf '%s' "${IMAGE_DIGEST}" \
+          > "$(workspaces.source.path)/image-digest"
 
         echo "Tekton result:"
         cat "$(results.IMAGE_DIGEST.path)"
 
         echo "Common image digest file:"
         cat "$(workspaces.source.path)/image-digest"
+```
+apply 
 
 ```
-
-Create buildpack task (if its alreagy created avoid it)
-
-Buildpacks Phases Task
-
-This is the main Buildpacks installation step for Tekton. The current Buildpacks documentation points to Buildpacks Phases Task 0.3.
-
-Run:
-
+kubectl apply -f buildkit-build-task-update.yaml 
 ```
-kubectl apply -f https://raw.githubusercontent.com/tektoncd/catalog/refs/heads/main/task/buildpacks-phases/0.3/buildpacks-phases.yaml -n cicd
+Verify
+```
+kubectl get task buildkit-build -n cicd
 ```
 
-You should get:
+### cosign task 
+This sign-image Task is the security/signing stage after BuildKit or Buildpacks. Its job is to generate an SBOM, 
+sign the image with Cosign, attach the SBOM as an attestation, and return the image digest.
 
-```
-task.tekton.dev/buildpacks-phases created
-```
+sign-image and generate SBOM
 
-Verify the Buildpacks Task
-
-Run:
-
-```
-kubectl get task -n cicd
-```
-
-Create the unified signing Task
-
-sign-image.yaml
-
-The Task will:
-
-1. Determine image digest
-
-2. Generate SBOM
-
-3. Sign image
-
-4. Attest SBOM
-
-5. Verify signature
-
-**sign-image.yaml**
+create sign-image-task-update.yaml
 
 ```
 apiVersion: tekton.dev/v1
@@ -2245,12 +2010,27 @@ spec:
     - name: source
 
 ```
-Create update-values task for helm chart update
-
-update-values.yaml
-
+apply:
+```
+kubectl apply -f sign-image-task-update.yaml
 ```
 
+Verify:
+
+```
+kubectl get task sign-image -n cicd
+```
+
+###  update-values task
+
+update-values is the GitOps update stage of the Tekton pipeline. It updates the Helm chart's values.yaml 
+with the newly built image and its digest, commits the change, and pushes it back to repository.
+
+update-values
+
+create update-values.yaml
+
+```
 apiVersion: tekton.dev/v1
 kind: Task
 
@@ -2639,70 +2419,25 @@ spec:
         echo "Changes pushed to GitHub."
 
 ```
-
-## Create the git-clone Task
-
-```
-kubectl apply -f git-clone.yaml
-```
-
-Check:
-
-```
-kubectl get task git-clone-update -n cicd
-```
-
-Create the BuildKit Task
-
-```
-kubectl apply -f buildkit-build.yaml
-```
-
-Check:
-
-```
-kubectl get task buildkit-build -n cicd
-```
-
-Create detection Task
-
-```
-kubectl apply -f detect-build-type.yaml
-```
-
-Check:
-
-```
-kubectl get task detect-build-type -n cicd
-```
-
-Create Cosign Task
-
-```
-kubectl apply -f sign-image.yaml
-```
-
-Check:
-
-```
-kubectl get task sign-image -n cicd
-```
-
-Create update-values task
-
+apply:
 ```
 kubectl apply -f update-values.yaml
 ```
-
-Check:
+Verify:
 
 ```
 kubectl get task update-values -n cicd
 ```
 
-Create Pipeline
+# pipeline creation
 
-travelportal-pipeline.yaml
+Tasks are added to the Pipeline using taskRef, which references previously created Tekton Tasks. params pass required values to each Task, workspaces share files/credentials, and runAfter/when control the execution order and conditions.
+The Pipeline first clones the repository, then detects whether a Dockerfile exists and runs BuildKit or Buildpacks accordingly. After the image is built, the sign Task generates the SBOM and signs/attests the image.
+Finally, the update-values Task receives the image digest from the sign Task, updates values.yaml, commits the change, and pushes it back to GitHub—completing the GitOps update.
+
+###  Pipeline
+
+create travelportal-pipeline-values-update.yaml
 
 ```
 apiVersion: tekton.dev/v1
@@ -2714,7 +2449,7 @@ spec:
   params:
     - name: REPO_URL
       type: string
-      default: https://github.com/kondurupurandhar/TravelPortal-test-buildpacks.git
+      default: https://github.com/kondurupurandhar/TravelPortal-test-buildpacks.git 
     - name: REVISION
       type: string
       default: main
@@ -2858,7 +2593,7 @@ spec:
           value: $(tasks.sign.results.IMAGE_DIGEST)
 
         - name: VALUES_FILE
-          value: "helm-charts/values.yaml"
+          value: "helm-charts/values.yaml"         
 
         - name: GIT_BRANCH
           value: "$(params.REVISION)"
@@ -2874,97 +2609,28 @@ spec:
        #   workspace: git-credentials
 
 ```
+apply: 
 
 ```
-kubectl apply -f travelportal-pipeline.yaml
+kubectl apply -f travelportal-pipeline-values-update.yaml
 ```
 
-Check:
+Verify:
 
 ```
 kubectl get pipeline -n cicd
 ```
 
-Expected:
+### piplinerun 
 
-```
-travelportal-pipeline-values-update
-```
+The PipelineRun is used to start and execute the travelportal-pipeline-values-update Pipeline. It provides the pipeline parameters,connects the required workspaces and secrets, and applies additional Pod configuration needed during the pipeline execution.
+The pipelineRef selects the travelportal-pipeline-values-update Pipeline, while params provide the GitHub repository, branch, Harbor image, and Buildpacks builder image that the Pipeline will use.
+The workspaces provide the required storage and credentials: the source PVC stores application files, dockerconfig provides Harbor authentication, cosign-key provides the image-signing key, and the sbom PVC provides storage for SBOM data.
+The taskRunSpecs customizes the BuildKit TaskRun by adding the harbor-ca ConfigMap as a volume. This allows the BuildKit Pod to access the Harbor CA certificate for secure TLS communication with the Harbor registry.
 
-Pipeline design
+Pipelinerun
 
-Recommended final implementation
-
-Use these 5 Tasks:
-
-1. git-clone
-
-2. detect-build-type
-
-3. build-image
-
-4. generate-sbom
-
-5. cosign-sign
-
-6. image push to harbor
-
-The Pipeline becomes:
-
-```
-                    +------------------+
-                    |     GitHub       |
-                    |   TravelPortal   |
-                    +--------+---------+
-                             |
-                             v
-                       +-----------+
-                       | git-clone |
-                       +-----+-----+
-                             |
-                             v
-                    +----------------+
-                    | detect-build   |
-                    |     type       |
-                    +-------+--------+
-                            |
-                 +----------+----------+
-                 |                     |
-            Dockerfile             No Dockerfile
-                 |                     |
-                 v                     v
-           +-----------+        +-------------+
-           |  BuildKit |        |  Buildpacks |
-           +-----+-----+        +------+------+
-                 |                     |
-                 +----------+----------+
-                            |
-                            v
-                    +---------------+
-                    |     Syft      |
-                    | Generate SBOM  |
-                    +-------+-------+
-                            |
-                            v
-                    +---------------+
-                    |    Cosign      |
-                    | Sign image     |
-                    | Attest SBOM   |
-                    +-------+-------+
-                            |
-                            v
-                    +---------------+
-                    |    Harbor      |
-                    |               |
-                    | image         |
-                    | signature     |
-                    | SBOM          |
-                    +---------------+
-```
-
-Create Pipelinerun
-
-travelportal-pipelinerun.yaml
+create travelportal-pipelinerun-pack-values-update.yaml
 
 ```
 apiVersion: tekton.dev/v1
@@ -3016,121 +2682,17 @@ spec:
               name: harbor-ca-cert
 
 ```
-
-run:
+apply:
 
 ```
-kubectl apply -f travelportal-pipelinerun.yaml
+kubectl apply -f  travelportal-pipelinerun-pack-values-update.yaml
 ```
 
-Check:
-
+verify:
 ```
 kubectl get pipelinerun -n cicd
 ```
 
-Expected:
-
-```
-travelportal-build-xxxxx
-```
-
-Watch PipelineRun
-
-```
-kubectl get pipelinerun -n cicd
-```
-
-Then:
-
-```
-kubectl get taskrun -n cicd
-```
-
-And:
-
-```
-kubectl get pods -n cicd
-```
-
-You should see something like:
-
-```
-travelportal-build-xxxxx
-```
-
-Expected execution for TravelPortal
-
-Because TravelPortal has a Dockerfile, you should see:
-
-```
-clone
-  |
-  v
-detect
-  |
-  | BUILD_TYPE=buildkit
-  |
-  v
-buildkit
-  |
-  | moby/buildkit
-  |
-  v
-Harbor image
-  |
-  v
-Syft
-  |
-  v
-SBOM
-  |
-  v
-Cosign
-```
-
-The important log should be:
-
-```
-Dockerfile found.
-Using BuildKit.
-```
-
-Then:
-
-```
-Starting BuildKit...
-```
-
-Then:
-
-```
-BuildKit build completed.
-```
-
-Expected Harbor result
-
-In Harbor:
-
-```
-lab25-harbor.lab25.sunfire.lab
-        |
-        +-- cicd
-             |
-             +-- travelportal
-                  |
-                  +-- latest
-                  |
-                  +-- signature
-                  |
-                  +-- SBOM attestation
-```
-
-The image itself will be:
-
-```
-lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-```
 
 Verify image in Harbor
 
@@ -3139,9 +2701,7 @@ From a machine that can reach Harbor:
 ```
 docker login lab25-harbor.lab25.sunfire.lab
 ```
-
-Then:
-
+then
 ```
 docker pull \
   lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
