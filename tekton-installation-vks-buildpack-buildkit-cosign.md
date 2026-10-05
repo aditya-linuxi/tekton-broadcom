@@ -2861,9 +2861,12 @@ kubectl get pipeline -n cicd
  
 ## PipelineRun
  
-The PipelineRun is used to start and execute the travelportal-pipeline-values-update Pipeline. It provides the pipeline parameters,connects the required workspaces and secrets, and applies additional Pod configuration needed during the pipeline execution. The `pipelineRef` selects the travelportal-pipeline-values-update Pipeline, while params provide the GitHub repository, branch, Harbor image, and Buildpacks builder image that the Pipeline will use. The workspaces provide the required storage and credentials: the source PVC stores application files, dockerconfig provides Harbor authentication, and cosign-key provides the image-signing key. The SBOM is written to the shared source workspace. The taskRunSpecs customizes the BuildKit TaskRun by adding the harbor-ca ConfigMap as a volume. This allows the BuildKit Pod to access the Harbor CA certificate for secure TLS communication with the Harbor registry.
- 
-## Pipeline Dependencies (PVC, ConfigMaps, Secrets, Service Account)
+The PipelineRun starts and executes the travelportal-pipeline-values-update Pipeline.
+It provides the Git repository, branch, Harbor image, and Buildpacks builder as parameters.
+The workspaces provide storage, Harbor credentials, and the Cosign signing key, while the SBOM is stored in the shared workspace.
+The taskRunSpecs adds the harbor-ca ConfigMap to the BuildKit Pod, enabling secure TLS communication with Harbor.
+
+### Pipeline Dependencies (PVC, ConfigMaps, Secrets, Service Account)
  
 Before triggering the PipelineRun, create the required storage, configuration, and Service Account. The credentials are created in the **Secrets** section.
  
