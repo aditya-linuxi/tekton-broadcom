@@ -3522,3 +3522,11 @@ Webhook target  → http://10.12.92.3:31877
 | Problem | Cause | Action |
 |---|---|---|
 | Pipeline triggers itself repeatedly | The CI commit message does not match the CEL prefix used by CEL | Ensure `update-values` commits with `ci: update TravelPortal image digest` and the EventListener filters the same prefix |
+
+## Conclusion
+
+This implementation provides a Kubernetes-native CI workflow on VKS using Tekton, BuildKit, Buildpacks, Syft, Cosign, and Harbor. The pipeline automatically selects BuildKit or Buildpacks based on the application source, generates an SBOM, signs the immutable image digest, and stores the resulting image and security artifacts in Harbor.
+
+The architecture also separates the application source and internal CI/GitOps responsibilities across two repositories, providing a clear and controlled workflow for source management and deployment configuration.
+
+Overall, the solution provides an automated, traceable, and security-focused CI process that can be operated in both connected and disconnected VKS environments, provided the required images, dependencies, credentials, and registry artifacts are available locally.
