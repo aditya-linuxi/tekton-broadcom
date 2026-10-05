@@ -20,8 +20,10 @@
 
 **Webhook:** An HTTP call the repository sends to the Tekton EventListener every time someone pushes code.
 
+
 > **Note:** Two repositories are used: GitHub for application source code and Gitea for the internal CI/GitOps workflow.
 > GitHub triggers the build, while Gitea stores the pipeline-updated `values.yaml`.
+
 
 ## Why use BuildKit and Buildpacks with Tekton on VKS?
 
