@@ -1029,90 +1029,95 @@ Create `git-clone-update-task.yaml`
 ```yaml
 apiVersion: tekton.dev/v1
 kind: Task
- 
 metadata:
   name: git-clone-update
   namespace: cicd
- 
+
 spec:
   description: Clone a Git repository
- 
+
   params:
     - description: Git repository URL
       name: url
       type: string
- 
+
     - default: main
-      description: Git branch or tag (git clone --branch cannot check out a raw commit SHA)
+      description: Git branch, tag, or commit
       name: revision
       type: string
- 
+
     - default: "true"
       description: Delete existing workspace contents
       name: deleteExisting
       type: string
- 
+
   steps:
     - computeResources: {}
       image: alpine/git:latest
       name: clone
- 
+
       script: |
         #!/bin/sh
+
         set -eu
- 
+
         WORKSPACE="$(workspaces.output.path)"
- 
+
         echo "========================================"
         echo "Git Clone"
         echo "========================================"
+
         echo "Workspace: ${WORKSPACE}"
         echo "Repository: $(params.url)"
         echo "Revision:   $(params.revision)"
+
         echo ""
- 
         echo "Cleaning workspace..."
-        rm -rf "${WORKSPACE:?}"/*
-        rm -rf "${WORKSPACE:?}"/.[!.]*
-        rm -rf "${WORKSPACE:?}"/..?*
- 
+
+        rm -rf "${WORKSPACE}"/*
+        rm -rf "${WORKSPACE}"/.[!.]*
+        rm -rf "${WORKSPACE}"/..?*
+
         echo "Cloning repository..."
+
         git clone \
           --branch "$(params.revision)" \
           --depth 1 \
           "$(params.url)" \
           "${WORKSPACE}"
- 
+
         echo "========================================"
         echo "Repository cloned successfully"
         echo "========================================"
- 
+
         echo "Repository contents:"
+
         ls -la "${WORKSPACE}"
- 
+
         echo ""
         echo "========================================"
         echo "Configuring Git safe.directory"
         echo "========================================"
- 
+
         git config --global --add safe.directory "${WORKSPACE}"
- 
+
         echo "safe.directory configured:"
         git config --global --get-all safe.directory
- 
+
         echo ""
         echo "========================================"
         echo "Git status"
         echo "========================================"
- 
+
         cd "${WORKSPACE}"
+
         git status
- 
+
         echo ""
         echo "========================================"
         echo "Git Clone Completed"
         echo "========================================"
- 
+
   workspaces:
     - description: Workspace where the Git repository will be cloned
       name: output
@@ -1139,43 +1144,49 @@ kubectl get task git-clone-update -n cicd
 Create `detect-build-type.yaml`
  
 ```yaml
+
 apiVersion: tekton.dev/v1
 kind: Task
- 
 metadata:
   name: detect-build-type
   namespace: cicd
- 
+
 spec:
+
   workspaces:
     - name: source
- 
+
   results:
     - name: BUILD_TYPE
-      description: "Build type: buildkit or buildpack"
- 
+      description: buildkit or buildpack
+
   steps:
+
     - name: detect
       image: alpine:3.20
- 
+
       script: |
         #!/bin/sh
         set -eu
- 
+
         echo "Checking source repository..."
- 
+
         cd "$(workspaces.source.path)"
- 
+
         if [ -f Dockerfile ]; then
+
           echo "Dockerfile found."
           echo "Using BuildKit."
- 
+
           printf "buildkit" > "$(results.BUILD_TYPE.path)"
+
         else
+
           echo "Dockerfile not found."
           echo "Using Buildpacks."
- 
+
           printf "buildpack" > "$(results.BUILD_TYPE.path)"
+
         fi
 ```
  
@@ -1200,11 +1211,11 @@ Buildpacks: Phases Task A ready-made Tekton Task that builds an image from sourc
 Create `buildpacks-phases.yaml`
  
 ```yaml
+---
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
   name: buildpacks-phases
-  namespace: cicd
   labels:
     app.kubernetes.io/version: "0.3"
   annotations:
@@ -1218,12 +1229,12 @@ spec:
     The Buildpacks-Phases task builds source into a container image and pushes it to
     a registry, using Cloud Native Buildpacks - https://buildpacks.io/. This task separately calls the aspects of the
     Cloud Native Buildpacks lifecycle, to provide increased security via container isolation.
- 
+
     When the builder image includes extensions (= Dockerfiles), then this task will execute them.
     That allows to by example install packages, rpm, etc and to customize the build process according to your needs.
- 
+
     This task supports the Platform spec 0.13: https://github.com/buildpacks/spec/blob/platform/v0.13/platform.md
- 
+
   workspaces:
     - name: source
       description: Directory where application source is located.
@@ -1231,9 +1242,9 @@ spec:
       description: Directory where cache is stored (when no cache image is provided).
       optional: true
     - name: dockerconfig
-      description: Docker config (config.json) for registry authentication.
+      description: Docker config for registry authentication.   # ✅ add this
       optional: true
- 
+
   params:
     - name: CNB_BUILD_IMAGE
       description: Reference to the current build image in an OCI registry (if used <kaniko-dir> must be provided)
@@ -1274,7 +1285,7 @@ spec:
     - name: CNB_PROCESS_TYPE
       description: Default process type to set in the exported image
       # making it emppty so that buildpack pack can assign web
-      default: ""
+      default: "" 
     - name: CNB_RUN_IMAGE
       description: Reference to an image which is packaging the application runtime to be launched.
       default: ""
@@ -1289,7 +1300,7 @@ spec:
     - name: CNB_USER_ID
       description: The user ID of the builder image user.
       default: ""
- 
+
     - name: APP_IMAGE
       description: The name of the container image for your application.
     - name: SOURCE_SUBPATH
@@ -1304,11 +1315,11 @@ spec:
     - name: INSPECT_TOOLS_IMAGE
       description: Image packaging tools like skopeo and jq to inspect the builder images
       default: quay.io/halkyonio/skopeo-jq:0.1.3@sha256:1b3d21ad541227dc9d3e793d18cef9eb00a969c0c01eb09cab88997bc63680c6
- 
+
   results:
     - name: APP_IMAGE_DIGEST
       description: The digest of the built `APP_IMAGE`.
- 
+
   stepTemplate:
     env:
       - name: CNB_EXPERIMENTAL_MODE
@@ -1342,33 +1353,34 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -eu
- 
+
         if [ "${PARAM_VERBOSE}" = "debug" ] ; then
           set -x
         fi
         echo "Creating the path for docker.."
         mkdir -p /tekton/home/.docker
         echo "--> Copying dockerconfig credentials"
-        if [[ "$(workspaces.dockerconfig.bound)" == "true" && -f "$(workspaces.dockerconfig.path)/config.json" ]]; then
-           cp "$(workspaces.dockerconfig.path)/config.json" "/tekton/home/.docker/config.json"
-           echo "Copied config.json from the dockerconfig workspace"
+        ls -lrt "$(workspaces.source.path)/$(params.SOURCE_SUBPATH)/.docker/"
+        if [[ -f "$(workspaces.source.path)/$(params.SOURCE_SUBPATH)/.docker/config.json" ]]; then
+           cp "$(workspaces.source.path)/$(params.SOURCE_SUBPATH)/.docker/config.json" "/tekton/home/.docker/config.json"
+           echo "Copied .dockerconfigjson to config.json"
         fi
-        echo "# Check if registry creds docker file has been mounted from a secret"
+        echo # Check if registry creds docker file has been mounted from a secret"
         if [[ -f "$HOME/.docker/config.json" ]]; then
           printf %"s\n" "The docker config.json file exists !"
         else
           printf %"s\n" "!!!!! Warning: No registry credentials file exist. So it could be possible that the task will fail due to docker rate limit, etc !!!"
         fi
- 
+
         printf %"s\n" "Remove the @sha from the image as not supported by skopeo to inspect an image"
         CLEANED_IMAGE="${PARAM_BUILDER_IMAGE%@*}"
- 
+
         EXT_LABEL_1="io.buildpacks.extension.layers"
         EXT_LABEL_2="io.buildpacks.buildpack.order-extensions"
         BUILDER_LABEL="io.buildpacks.builder.metadata"
- 
+
         IMG_MANIFEST=$(skopeo inspect --authfile $HOME/.docker/config.json "docker://${CLEANED_IMAGE}")
- 
+
         #
         # The following test should be reviewed as :
         #
@@ -1378,20 +1390,20 @@ spec:
         # 2) Do we have to check the content of this label too ?
         #    "io.buildpacks.buildpack.order-extensions": "null",
         #
- 
+
         IMG_LABELS=$(echo $IMG_MANIFEST | jq -e '.Labels')
- 
-        if [[ $(echo "$IMG_LABELS" | jq -r '.['\"'${BUILDER_LABEL}'\"]') != "{}" ]] > /dev/null; then
+
+        if [[ $(echo "$IMG_LABELS" | jq -r '.["'${BUILDER_LABEL}'"]') != "{}" ]] > /dev/null; then
           printf %"s\n" "## The builder image ${PARAM_BUILDER_IMAGE} includes the label: \"${BUILDER_LABEL}\" :"
- 
-          builderLabel=$(echo -n "$IMG_LABELS" | jq -r '.['\"'${BUILDER_LABEL}'\"]')
+
+          builderLabel=$(echo -n "$IMG_LABELS" | jq -r '.["'${BUILDER_LABEL}'"]')
           platforms=($(echo $builderLabel | jq -r '.lifecycle.apis.platform.supported'))
           printf %"s\n" "Lifecycle platforms API supported: ${platforms[@]}"
- 
+
           CNB_PLATFORM_API=${PARAM_CNB_PLATFORM_API:-$PARAM_CNB_PLATFORM_API_SUPPORTED}
           echo "Platform API selected: $CNB_PLATFORM_API"
           printf %"s\n" "Platform API supported by this task: $PARAM_CNB_PLATFORM_API_SUPPORTED"
- 
+
           if [[ "${platforms[@]}" =~ "$CNB_PLATFORM_API" && "$CNB_PLATFORM_API" == "$PARAM_CNB_PLATFORM_API_SUPPORTED" ]]; then
               echo -n "$CNB_PLATFORM_API" > "$(step.results.CNB_PLATFORM_API.path)"
               printf %"s\n" "$CNB_PLATFORM_API is in the list of the platform supported by lifecycle like also this Tekton task :-)"
@@ -1400,24 +1412,24 @@ spec:
               exit 1
           fi
         fi
- 
-        if [[ $(echo "$IMG_LABELS" | jq -r '.['\"'${EXT_LABEL_1}'\"]') != "{}" ]] > /dev/null; then
+
+        if [[ $(echo "$IMG_LABELS" | jq -r '.["'${EXT_LABEL_1}'"]') != "{}" ]] > /dev/null; then
           echo "## The builder image ${PARAM_BUILDER_IMAGE} includes some extensions as the extension label \"${EXT_LABEL_1}\" is NOT empty:"
-          echo -n "$IMG_LABELS" | jq -r '.['\"'${EXT_LABEL_1}'\"]' | tee "$(step.results.EXTENSION_LABELS.path)"
+          echo -n "$IMG_LABELS" | jq -r '.["'${EXT_LABEL_1}'"]' | tee "$(step.results.EXTENSION_LABELS.path)"
           echo ""
         else
           echo "## The builder image ${PARAM_BUILDER_IMAGE} dot not include extensions as the extension label \"${EXT_LABEL_1}\" is empty !"
           echo -n "empty" | tee "$(step.results.EXTENSION_LABELS.path)"
         fi
- 
+
         CNB_USER_ID=$(echo $IMG_MANIFEST | jq -r '.Env' | jq -r '.[] | select(test("^CNB_USER_ID="))'  | cut -d '=' -f 2)
         CNB_GROUP_ID=$(echo $IMG_MANIFEST | jq -r '.Env' | jq -r '.[] | select(test("^CNB_GROUP_ID="))' | cut -d '=' -f 2)
- 
+
         echo "## The CNB_USER_ID & CNB_GROUP_ID defined within the builder image: ${PARAM_BUILDER_IMAGE} are:"
         echo -n "$CNB_USER_ID"  | tee "$(step.results.UID.path)"
         echo ""
         echo -n "$CNB_GROUP_ID" | tee "$(step.results.GID.path)"
- 
+
     - name: prepare
       image: registry.access.redhat.com/ubi8/ubi-minimal@sha256:b2a1bec3dfbc7a14a1d84d98934dfe8fdde6eb822a211286601cf109cbccb075
       args:
@@ -1431,23 +1443,23 @@ spec:
       script: |
         #!/usr/bin/env bash
         set -eu
- 
+
         echo "CNB UID: $CNB_USER_ID"
         echo "CNB GID: $CNB_GROUP_ID"
- 
+
         if [[ "$(workspaces.cache.bound)" == "true" ]]; then
           echo "--> Setting permissions on '$(workspaces.cache.path)'..."
           chown -R "$CNB_USER_ID:$CNB_GROUP_ID" "$(workspaces.cache.path)"
         fi
- 
+
         echo "--> Creating .docker folder"
         mkdir -p "/tekton/home/.docker"
- 
+
         for path in "/tekton/home" "/tekton/home/.docker" "/tekton/creds" "/layers" "$(workspaces.source.path)"; do
           echo "--> Setting permissions on '$path'..."
           chown -R "$CNB_USER_ID:$CNB_GROUP_ID" "$path"
         done
- 
+
         echo "--> Parsing additional configuration..."
         parsing_flag=""
         envs=()
@@ -1459,13 +1471,13 @@ spec:
                 envs+=("$arg")
             fi
         done
- 
+
         echo "--> Processing any environment variables..."
         ENV_DIR="/platform/env"
- 
+
         echo "--> Creating 'env' directory: $ENV_DIR"
         mkdir -p "$ENV_DIR"
- 
+
         for env in "${envs[@]}"; do
             IFS='=' read -r key value string <<< "$env"
             if [[ "$key" != "" && "$value" != "" ]]; then
@@ -1476,16 +1488,16 @@ spec:
         done
         echo "--> Content of $(params.CNB_PLATFORM_DIR)/env"
         ls -la $(params.CNB_PLATFORM_DIR)/env
- 
+
         echo "--> Show the project cloned within the workspace ..."
         ls -la $(workspaces.source.path)/$(params.SOURCE_SUBPATH)
- 
+
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
         - name: platform-dir
           mountPath: $(params.CNB_PLATFORM_DIR)
- 
+
     - name: analyze
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1507,7 +1519,7 @@ spec:
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
- 
+
     - name: detect
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1529,7 +1541,7 @@ spec:
           mountPath: $(params.CNB_PLATFORM_DIR)
         - name: tekton-home-dir
           mountPath: /tekton/home
- 
+
     - name: restore
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1571,7 +1583,7 @@ spec:
           mountPath: /layers
         - name: kaniko-dir
           mountPath: /kaniko
- 
+
     - name: extender
       when:
         - input: $(steps.get-labels-and-env.results.EXTENSION_LABELS)
@@ -1606,7 +1618,7 @@ spec:
           mountPath: /tekton/home
         - name: platform-dir
           mountPath: $(params.CNB_PLATFORM_DIR)
- 
+
     - name: build
       when:
         - input: $(steps.get-labels-and-env.results.EXTENSION_LABELS)
@@ -1632,7 +1644,7 @@ spec:
           mountPath: $(params.CNB_PLATFORM_DIR)
         - name: tekton-home-dir
           mountPath: /tekton/home
- 
+
     - name: export
       image: $(params.CNB_BUILDER_IMAGE)
       imagePullPolicy: Always
@@ -1656,45 +1668,41 @@ spec:
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
- 
+
     - name: results
       image: registry.access.redhat.com/ubi8/python-311@sha256:43605cb2491ef2297a7acf4b4bf0b7f54f0c91b96daf12ae41c49cc7f192b153
-      securityContext:
-        runAsUser: 0
       script: |
         #!/usr/bin/env python3
- 
+
         import tomllib
- 
+
         def write_to_file(filename, content):
           with open(filename, "w") as f:
             f.write(content)
- 
+
         with open("/layers/report.toml", "rb") as f:
             data = tomllib.load(f)
- 
+
         img_data = data.get("image")
- 
+
         tags = img_data.get("tags")
         digest = img_data.get("digest")
         image_id = img_data.get("image_id")
         manifest_size = img_data.get("manifest_size")
- 
+
         print("#### Image data ####")
         print(f"tags: {tags}")
         print(f"Digest: {digest}")
- 
+
         if None not in (image_id, manifest_size):
           print(f"image container id (when using daemon): {image_id}, manifest size: {manifest_size}")
- 
-        write_to_file('$(results.APP_IMAGE_DIGEST.path)', digest)
-        # Same common digest file that BuildKit writes - read later by the sign-image task
-        write_to_file('$(workspaces.source.path)/image-digest', digest)
- 
+
+        write_to_file('$(results.APP_IMAGE_DIGEST.path)',digest)
+
       volumeMounts:
         - name: layers-dir
           mountPath: /layers
- 
+
   volumes:
     - name: tekton-home-dir
       emptyDir: {}
@@ -1729,130 +1737,124 @@ create `buildkit-build-task-update.yaml`
 ```yaml
 apiVersion: tekton.dev/v1
 kind: Task
- 
 metadata:
   name: buildkit-build
   namespace: cicd
- 
 spec:
   params:
     - name: IMAGE
       type: string
- 
     - name: DOCKERFILE
       type: string
       default: Dockerfile
- 
     - name: CONTEXT
       type: string
       default: .
- 
   results:
     - name: IMAGE_DIGEST
       description: Digest of the pushed image
       type: string
- 
   workspaces:
     - name: source
     - name: dockerconfig
- 
   steps:
     - name: build
       image: moby/buildkit:latest
- 
       env:
         - name: DOCKER_CONFIG
           value: $(workspaces.dockerconfig.path)
- 
       securityContext:
         privileged: true
- 
-      volumeMounts:
-        - name: harbor-ca
-          mountPath: /harbor-ca
-          readOnly: true
- 
       script: |
         #!/bin/sh
         set -eu
- 
         echo "======================================"
         echo "Starting BuildKit build"
         echo "======================================"
- 
         echo "IMAGE:"
         echo "$(params.IMAGE)"
- 
         echo "DOCKERFILE:"
         echo "$(params.DOCKERFILE)"
- 
         echo "CONTEXT:"
         echo "$(params.CONTEXT)"
- 
         echo "Checking Dockerfile..."
         test -f "$(workspaces.source.path)/$(params.DOCKERFILE)"
         echo "Dockerfile found."
- 
-        # Trust the Harbor CA certificate (mounted from the harbor-ca-cert ConfigMap)
-        mkdir -p /usr/local/share/ca-certificates
-        if [ -f /harbor-ca/ca.crt ]; then
-          cp /harbor-ca/ca.crt /usr/local/share/ca-certificates/harbor-ca.crt
-          apk add --no-cache ca-certificates 2>/dev/null || true
-          update-ca-certificates 2>/dev/null || true
-        fi
- 
-        # Use the Docker config from the dockerconfig workspace (harbor-registry-secret)
-        test -f "$(workspaces.dockerconfig.path)/config.json"
-        export DOCKER_CONFIG="$(workspaces.dockerconfig.path)"
- 
+
+        # Fetch and trust Harbor CA cert
+        apk add --no-cache openssl ca-certificates 2>/dev/null || true
+        openssl s_client -connect lab25-harbor.lab25.sunfire.lab:443 \
+          -showcerts </dev/null 2>/dev/null \
+          | awk '/BEGIN CERTIFICATE/,/END CERTIFICATE/' \
+          > /usr/local/share/ca-certificates/harbor-ca.crt
+        update-ca-certificates 2>/dev/null || true
+
+        # Create docker config with Harbor credentials
+        mkdir -p /tmp/dockerconfig
+        HARBOR_AUTH=$(echo -n "admin:VMware1!" | base64 | tr -d '\n')
+        cat > /tmp/dockerconfig/config.json <<EOF
+        {
+          "auths": {
+            "lab25-harbor.lab25.sunfire.lab": {
+              "auth": "${HARBOR_AUTH}"
+            }
+          }
+        }
+        EOF
+        export DOCKER_CONFIG=/tmp/dockerconfig
         cd "$(workspaces.source.path)"
- 
         echo "Creating BuildKit configuration..."
- 
         cat > /tmp/buildkitd.toml <<EOF
         [registry."lab25-harbor.lab25.sunfire.lab"]
           insecure = true
         EOF
- 
+
         echo "BuildKit configuration:"
         cat /tmp/buildkitd.toml
- 
         echo "Starting BuildKit..."
- 
-        BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" \
-        buildctl-daemonless.sh build \
+
+        #BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" buildctl-daemonless.sh build \
+        #  --frontend dockerfile.v0 \
+        #  --local context="$(workspaces.source.path)/$(params.CONTEXT)" \
+        #  --local dockerfile="$(workspaces.source.path)" \
+        #  --opt filename="$(params.DOCKERFILE)" \
+        #  --output type=image,name="$(params.IMAGE)",push=true,name-canonical=true,registry.insecure=true
+        #echo "BuildKit build completed."
+
+
+        BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" buildctl-daemonless.sh build \
           --frontend dockerfile.v0 \
           --local context="$(workspaces.source.path)/$(params.CONTEXT)" \
           --local dockerfile="$(workspaces.source.path)" \
           --opt filename="$(params.DOCKERFILE)" \
           --output type=image,name="$(params.IMAGE)",push=true,name-canonical=true,registry.insecure=true \
           --metadata-file=/tmp/build-metadata.json
- 
+
         echo "BuildKit build completed."
- 
+
         echo ""
         echo "======================================"
         echo "BuildKit metadata"
         echo "======================================"
- 
+
         cat /tmp/build-metadata.json
- 
+
         echo ""
         echo "======================================"
         echo "Extracting image digest"
         echo "======================================"
- 
+
         IMAGE_DIGEST=$(grep '"containerimage.digest"' /tmp/build-metadata.json \
           | sed 's/.*"containerimage.digest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
- 
+
         echo "IMAGE_DIGEST:"
         echo "${IMAGE_DIGEST}"
- 
+
         if [ -z "${IMAGE_DIGEST}" ]; then
           echo "ERROR: BuildKit did not return image digest"
           exit 1
         fi
- 
+
         case "${IMAGE_DIGEST}" in
           sha256:*)
             echo "Valid SHA256 digest."
@@ -1863,20 +1865,19 @@ spec:
             exit 1
             ;;
         esac
- 
+
         echo ""
         echo "======================================"
         echo "Writing Tekton IMAGE_DIGEST result"
         echo "======================================"
- 
+
         printf '%s' "${IMAGE_DIGEST}" > "$(results.IMAGE_DIGEST.path)"
- 
-        printf '%s' "${IMAGE_DIGEST}" \
-          > "$(workspaces.source.path)/image-digest"
- 
+
+        printf '%s' "${IMAGE_DIGEST}" > "$(workspaces.source.path)/image-digest"
+
         echo "Tekton result:"
         cat "$(results.IMAGE_DIGEST.path)"
- 
+
         echo "Common image digest file:"
         cat "$(workspaces.source.path)/image-digest"
 ```
@@ -1904,85 +1905,85 @@ create `sign-image-task-update.yaml`
 ```yaml
 apiVersion: tekton.dev/v1
 kind: Task
- 
+
 metadata:
   name: sign-image
   namespace: cicd
- 
+
 spec:
- 
+
   params:
     - name: IMAGE
       type: string
- 
+
   results:
     - name: IMAGE_DIGEST
       description: Digest of the image that was signed
       type: string
- 
+
   steps:
- 
+
     # ============================================================
     # STEP 1 - Generate SBOM
     # ============================================================
- 
+
     - name: sbom
       image: anchore/syft:latest
       computeResources: {}
- 
+
       env:
         - name: DOCKER_CONFIG
           value: $(workspaces.dockerconfig.path)
- 
+
         - name: SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY
           value: "true"
- 
+
       command:
         - /syft
- 
+
       args:
         - scan
         - $(params.IMAGE)
         - "-o"
         - spdx-json=$(workspaces.source.path)/sbom.spdx.json
- 
- 
+
+
     # ============================================================
     # STEP 2 - Cosign image
     # ============================================================
- 
+
     - name: sign
       image: ghcr.io/sigstore/cosign/cosign:v3.0.2
       computeResources: {}
- 
+
       env:
         - name: DOCKER_CONFIG
           value: $(workspaces.dockerconfig.path)
- 
+
         - name: COSIGN_INSECURE_IGNORE_SCT
           value: "true"
- 
+
         - name: COSIGN_PASSWORD
           valueFrom:
             secretKeyRef:
               name: cosign-password
               key: password
- 
+
         - name: REGISTRY_USERNAME
           valueFrom:
             secretKeyRef:
               name: harbor-credentials
               key: username
- 
+
         - name: REGISTRY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: harbor-credentials
               key: password
- 
+
       command:
         - /ko-app/cosign
- 
+
       args:
         - sign
         - --yes
@@ -1992,44 +1993,44 @@ spec:
         - --key
         - $(workspaces.cosign.path)/cosign.key
         - $(params.IMAGE)
- 
- 
+
+
     # ============================================================
     # STEP 3 - Attach SBOM attestation
     # ============================================================
- 
+
     - name: attest-sbom
       image: ghcr.io/sigstore/cosign/cosign:v3.0.2
       computeResources: {}
- 
+
       env:
         - name: DOCKER_CONFIG
           value: $(workspaces.dockerconfig.path)
- 
+
         - name: COSIGN_INSECURE_IGNORE_SCT
           value: "true"
- 
+
         - name: COSIGN_PASSWORD
           valueFrom:
             secretKeyRef:
               name: cosign-password
               key: password
- 
+
         - name: REGISTRY_USERNAME
           valueFrom:
             secretKeyRef:
               name: harbor-credentials
               key: username
- 
+
         - name: REGISTRY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: harbor-credentials
               key: password
- 
+
       command:
         - /ko-app/cosign
- 
+
       args:
         - attest
         - --yes
@@ -2043,8 +2044,8 @@ spec:
         - --predicate
         - $(workspaces.source.path)/sbom.spdx.json
         - $(params.IMAGE)
- 
- 
+
+
     # ============================================================
     # STEP 4 - Read common image digest
     #
@@ -2055,47 +2056,47 @@ spec:
     # This step reads the same file regardless of
     # which build method was used.
     # ============================================================
- 
+
     - name: image-digest
       image: alpine:3.20
       computeResources: {}
- 
+
       script: |
         #!/bin/sh
- 
+
         set -eu
- 
+
         echo "======================================"
         echo "Reading image digest"
         echo "======================================"
- 
+
         DIGEST_FILE="$(workspaces.source.path)/image-digest"
- 
+
         echo "Digest file:"
         echo "${DIGEST_FILE}"
- 
+
         echo ""
         echo "Checking digest file..."
- 
+
         if [ ! -f "${DIGEST_FILE}" ]; then
           echo "ERROR: Image digest file not found:"
           echo "${DIGEST_FILE}"
           exit 1
         fi
- 
+
         IMAGE_DIGEST="$(cat "${DIGEST_FILE}")"
- 
+
         echo ""
         echo "Image digest:"
         echo "${IMAGE_DIGEST}"
- 
+
         # Remove accidental whitespace/newline
         IMAGE_DIGEST="$(echo "${IMAGE_DIGEST}" | tr -d '[:space:]')"
- 
+
         echo ""
         echo "Cleaned image digest:"
         echo "${IMAGE_DIGEST}"
- 
+
         # Validate digest
         case "${IMAGE_DIGEST}" in
           sha256:*)
@@ -2109,30 +2110,30 @@ spec:
             exit 1
             ;;
         esac
- 
+
         # Write Tekton result
         printf '%s' "${IMAGE_DIGEST}" > "$(results.IMAGE_DIGEST.path)"
- 
+
         echo ""
         echo "======================================"
         echo "Tekton IMAGE_DIGEST result"
         echo "======================================"
- 
+
         cat "$(results.IMAGE_DIGEST.path)"
- 
- 
+
+
   # ==============================================================
   # WORKSPACES
   # ==============================================================
- 
+
   workspaces:
- 
+
     - name: dockerconfig
- 
+
     - name: cosign
- 
+
 #    - name: output
- 
+
     - name: source
 ```
  
@@ -2159,392 +2160,500 @@ create `update-values.yaml`
 ```yaml
 apiVersion: tekton.dev/v1
 kind: Task
- 
+
 metadata:
   name: update-values
   namespace: cicd
- 
+
 spec:
- 
+
   description: >
-    Clone the GitHub repository, update Helm values.yaml
-    with the newly built Harbor image, commit the change,
-    and push it back to GitHub.
- 
+    Clone the Kubernetes manifests repository, update Helm values.yaml
+    with the newly built Harbor image repository, tag and digest,
+    commit the change, and push it back to the Gitea repository.
+
   params:
- 
+
     - name: REPO_URL
       type: string
-      description: Git repository URL
-      default: https://github.com/kondurupurandhar/TravelPortal-test-buildpacks.git
- 
+      description: Git repository URL containing the Helm manifests
+      default: http://10.12.90.62/admin/k8s-manifests.git
+
     - name: IMAGE
       type: string
       description: Full container image including tag
       default: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
- 
+
     - name: IMAGE_DIGEST
       type: string
       description: SHA256 digest of the pushed image
- 
+
     - name: VALUES_FILE
       type: string
       description: Helm values file relative to repository root
       default: helm-charts/values.yaml
- 
+
     - name: GIT_BRANCH
       type: string
       description: Git branch
       default: main
- 
+
     - name: COMMIT_MESSAGE
       type: string
-      description: Git commit message (must start with the prefix used by the EventListener CEL filter)
-      default: "ci: update TravelPortal image digest"
- 
+      description: Git commit message
+      default: Update TravelPortal image
+
   workspaces:
- 
+
     - name: source
       description: Workspace used by this task
- 
+
   steps:
- 
+
     - name: update-and-push
- 
+
       image: alpine/git:latest
- 
+
       env:
- 
+
         - name: GIT_USERNAME
           valueFrom:
             secretKeyRef:
-              name: github-push-secret
+              name: gitea-git-credentials
               key: username
- 
+
         - name: GIT_TOKEN
           valueFrom:
             secretKeyRef:
-              name: github-push-secret
+              name: gitea-git-credentials
               key: token
- 
+
       script: |
         #!/bin/sh
- 
         set -eu
- 
+
+
         WORKDIR="$(workspaces.source.path)"
- 
+
+
         echo "========================================"
         echo "Update Helm values.yaml"
         echo "========================================"
- 
+
         echo ""
         echo "Workspace:"
         echo "${WORKDIR}"
- 
+
         echo ""
         echo "Repository:"
         echo "$(params.REPO_URL)"
- 
+
         echo ""
         echo "Branch:"
         echo "$(params.GIT_BRANCH)"
- 
+
         echo ""
         echo "Image:"
         echo "$(params.IMAGE)"
- 
+
         echo ""
         echo "Image digest:"
         echo "$(params.IMAGE_DIGEST)"
- 
+
         echo ""
         echo "Values file:"
         echo "$(params.VALUES_FILE)"
- 
+
+
         # ----------------------------------------
         # Clean workspace
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Cleaning workspace"
         echo "========================================"
- 
+
         rm -rf "${WORKDIR:?}"/*
         rm -rf "${WORKDIR}"/.[!.]*
         rm -rf "${WORKDIR}"/..?*
- 
+
+
         # ----------------------------------------
-        # Clone repository
+        # Clone manifests repository
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
-        echo "Cloning Git repository"
+        echo "Cloning manifests repository"
         echo "========================================"
- 
+
         git clone \
           --branch "$(params.GIT_BRANCH)" \
-          --depth 1 \
           "$(params.REPO_URL)" \
           "${WORKDIR}"
- 
+
         echo ""
         echo "Repository cloned successfully."
- 
+
+
         # ----------------------------------------
-        # Configure Git safe directory
+        # Configure Git safe.directory
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Configuring Git safe.directory"
         echo "========================================"
- 
+
         git config --global --add safe.directory "${WORKDIR}"
- 
+
+
         # ----------------------------------------
         # Enter repository
         # ----------------------------------------
- 
+
         cd "${WORKDIR}"
- 
+
         echo ""
         echo "========================================"
         echo "Git repository"
         echo "========================================"
- 
+
         git status
- 
+
         echo ""
         echo "Current branch:"
         git branch --show-current
- 
+
+        echo ""
+        echo "Repository remote:"
+        git remote -v
+
         echo ""
         echo "Repository contents:"
         ls -la
- 
+
+
         # ----------------------------------------
         # Check values.yaml
         # ----------------------------------------
- 
+
         VALUES_FILE="${WORKDIR}/$(params.VALUES_FILE)"
- 
+
         echo ""
         echo "========================================"
         echo "Checking values.yaml"
         echo "========================================"
- 
+
         if [ ! -f "${VALUES_FILE}" ]; then
- 
+
           echo "ERROR: values.yaml not found:"
           echo "${VALUES_FILE}"
- 
+
           echo ""
           echo "Searching for values.yaml..."
- 
+
           find "${WORKDIR}" \
             -type f \
             -name "values.yaml" \
             -print
- 
+
           exit 1
- 
+
         fi
- 
+
+
         echo ""
         echo "Current values.yaml:"
         echo "----------------------------------------"
- 
+
         cat "${VALUES_FILE}"
- 
+
         echo "----------------------------------------"
- 
+
+
         # ----------------------------------------
-        # Extract image repository,  tag and digest
+        # Extract image repository, tag and digest
         # ----------------------------------------
- 
+
         IMAGE="$(params.IMAGE)"
+
         IMAGE_REPOSITORY="${IMAGE%:*}"
+
         IMAGE_TAG="${IMAGE##*:}"
+
         IMAGE_DIGEST="$(params.IMAGE_DIGEST)"
- 
+
+
         echo ""
         echo "========================================"
         echo "Image information"
         echo "========================================"
- 
+
+        echo ""
         echo "Full image:"
         echo "${IMAGE}"
- 
+
         echo ""
         echo "Image repository:"
         echo "${IMAGE_REPOSITORY}"
- 
+
         echo ""
         echo "Image tag:"
         echo "${IMAGE_TAG}"
- 
+
         echo ""
         echo "Image digest:"
         echo "${IMAGE_DIGEST}"
- 
- 
+
+
+        # ----------------------------------------
+        # Validate image
+        # ----------------------------------------
+
+        if [ -z "${IMAGE}" ]; then
+
+          echo "ERROR: IMAGE parameter is empty."
+
+          exit 1
+
+        fi
+
+
         # ----------------------------------------
         # Validate digest
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Validating image digest"
         echo "========================================"
- 
+
         case "${IMAGE_DIGEST}" in
+
           sha256:*)
             echo "Valid SHA256 digest."
             ;;
+
           *)
             echo "ERROR: IMAGE_DIGEST does not start with sha256:"
             echo "${IMAGE_DIGEST}"
             exit 1
             ;;
+
         esac
- 
+
+
         # ----------------------------------------
-        # Update image repository, tag and digest
+        # Update image repository
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
-        echo "Updating values.yaml"
+        echo "Updating image repository"
         echo "========================================"
- 
+
         sed -i \
           "/^image:/,/^env:/ s|^  repository:.*|  repository: ${IMAGE_REPOSITORY}|" \
           "${VALUES_FILE}"
- 
+
+
+        # ----------------------------------------
+        # Update image tag
+        # ----------------------------------------
+
+        echo ""
+        echo "Updating image tag"
+
         sed -i \
           "/^image:/,/^env:/ s|^  tag:.*|  tag: \"${IMAGE_TAG}\"|" \
           "${VALUES_FILE}"
- 
+
+
+        # ----------------------------------------
+        # Update image digest
+        # ----------------------------------------
+
+        echo ""
+        echo "Updating image digest"
+
         sed -i \
           "/^image:/,/^env:/ s|^  digest:.*|  digest: \"${IMAGE_DIGEST}\"|" \
           "${VALUES_FILE}"
- 
- 
+
+
+        # ----------------------------------------
+        # Display updated values.yaml
+        # ----------------------------------------
+
         echo ""
-        echo "Updated values.yaml:"
-        echo "----------------------------------------"
- 
+        echo "========================================"
+        echo "Updated values.yaml"
+        echo "========================================"
+
         cat "${VALUES_FILE}"
- 
+
         echo "----------------------------------------"
- 
+
+
         # ----------------------------------------
         # Configure Git
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Configuring Git"
         echo "========================================"
- 
+
         git config user.name "Tekton CI"
+
         git config user.email "tekton-ci@local"
- 
+
         git config --global --add safe.directory "${WORKDIR}"
- 
+
+
         # ----------------------------------------
-        # Configure GitHub authentication
+        # Configure authenticated Git remote
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
-        echo "Configuring GitHub authentication"
+        echo "Configuring Gitea authentication"
         echo "========================================"
- 
-        REPO_URL="$(params.REPO_URL)"
-        AUTH_REPO_URL="$(echo "${REPO_URL}" | sed "s#://#://${GIT_USERNAME}:${GIT_TOKEN}@#")"
- 
-        git remote set-url origin "${AUTH_REPO_URL}"
- 
-        echo "Git remote configured."
- 
+
+        AUTH_REPO_URL="$(params.REPO_URL)"
+
+        AUTH_REPO_URL="${AUTH_REPO_URL#http://}"
+
+        AUTH_REPO_URL="${AUTH_REPO_URL#https://}"
+
+        git remote set-url origin \
+          "http://${GIT_USERNAME}:${GIT_TOKEN}@${AUTH_REPO_URL}"
+
+        echo "Authenticated Git remote configured."
+
+
         # ----------------------------------------
         # Git diff
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Git diff"
         echo "========================================"
- 
+
         git diff -- "$(params.VALUES_FILE)"
- 
+
+
         # ----------------------------------------
-        # Check if anything changed
+        # Check for changes
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Checking for changes"
         echo "========================================"
- 
+
         if git diff --quiet -- "$(params.VALUES_FILE)"; then
- 
+
           echo "No changes detected in values.yaml."
- 
+
+          echo "Nothing to commit."
+
           exit 0
- 
+
         fi
- 
+
         echo "Changes detected."
- 
+
+
         # ----------------------------------------
         # Git add
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Git add"
         echo "========================================"
- 
+
         git add "$(params.VALUES_FILE)"
- 
+
         git status
- 
+
+
         # ----------------------------------------
         # Git commit
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Git commit"
         echo "========================================"
- 
+
         git commit \
           -m "$(params.COMMIT_MESSAGE): ${IMAGE}"
- 
+
+
+        # ----------------------------------------
+        # Fetch latest remote branch
+        # ----------------------------------------
+
+        echo ""
+        echo "========================================"
+        echo "Fetching latest remote branch"
+        echo "========================================"
+
+        git fetch origin "$(params.GIT_BRANCH)"
+
+
+        # ----------------------------------------
+        # Rebase local commit on latest remote
+        # ----------------------------------------
+
+        echo ""
+        echo "========================================"
+        echo "Rebasing on latest remote branch"
+        echo "========================================"
+
+        git rebase "origin/$(params.GIT_BRANCH)"
+
+
         # ----------------------------------------
         # Git push
         # ----------------------------------------
- 
+
         echo ""
         echo "========================================"
         echo "Git push"
         echo "========================================"
- 
+
         git push origin "$(params.GIT_BRANCH)"
- 
+
+
+        # ----------------------------------------
+        # Final status
+        # ----------------------------------------
+
         echo ""
         echo "========================================"
         echo "SUCCESS"
         echo "========================================"
- 
+
         echo "Helm values.yaml updated."
+
         echo "Git commit created."
-        echo "Changes pushed to GitHub."
+
+        echo "Changes pushed to:"
+        echo "$(params.REPO_URL)"
+
+        echo ""
+        echo "Updated image:"
+        echo "${IMAGE}"
+
+        echo ""
+        echo "Updated digest:"
+        echo "${IMAGE_DIGEST}"
 ```
  
 apply:
@@ -2577,7 +2686,7 @@ spec:
   params:
     - name: REPO_URL
       type: string
-      default: https://github.com/kondurupurandhar/TravelPortal-test-buildpacks.git 
+      default: http://10.12.90.62/admin/travelPortal-test-buildpack.git 
     - name: REVISION
       type: string
       default: main
@@ -2587,16 +2696,16 @@ spec:
     - name: BUILDER_IMAGE
       type: string
       default: paketobuildpacks/builder-jammy-base
- 
+
   workspaces:
     - name: source
     - name: dockerconfig
     - name: cosign-key
    # - name: sbom
    # - name: git-credentials
- 
+
   tasks:
- 
+
     # ----------------------------------------
     # 1. Clone GitHub repository
     # ----------------------------------------
@@ -2613,7 +2722,7 @@ spec:
       workspaces:
         - name: output
           workspace: source
- 
+
     # ----------------------------------------
     # 2. Detect BuildKit vs Buildpacks
     # ----------------------------------------
@@ -2625,7 +2734,7 @@ spec:
       workspaces:
         - name: source
           workspace: source
- 
+
     # ----------------------------------------
     # 3. Build using BuildKit
     # ----------------------------------------
@@ -2651,7 +2760,7 @@ spec:
           workspace: source
         - name: dockerconfig
           workspace: dockerconfig
- 
+
     # ----------------------------------------
     # 4. Build using Buildpacks
     # ----------------------------------------
@@ -2672,16 +2781,14 @@ spec:
           value: "$(params.IMAGE)"
         - name: SOURCE_SUBPATH
           value: ""
-        - name: CNB_INSECURE_REGISTRIES
-          value: "lab25-harbor.lab25.sunfire.lab"
       workspaces:
         - name: source
           workspace: source
         - name: dockerconfig
           workspace: dockerconfig
- 
- 
- 
+
+
+
     # ----------------------------------------
     # 5. Generate SBOM + Sign
     # ----------------------------------------
@@ -2703,7 +2810,7 @@ spec:
 #          workspace: sbom
         - name: source
           workspace: source
- 
+
     # ----------------------------------------
     # 6. Update values.yaml and push to Git
     # ----------------------------------------
@@ -2715,28 +2822,29 @@ spec:
       params:
         - name: REPO_URL
           value: "$(params.REPO_URL)"
- 
+
         - name: IMAGE
           value: "$(params.IMAGE)"
- 
+
         - name: IMAGE_DIGEST
           value: $(tasks.sign.results.IMAGE_DIGEST)
- 
+
         - name: VALUES_FILE
           value: "helm-charts/values.yaml"         
- 
+
         - name: GIT_BRANCH
           value: "$(params.REVISION)"
- 
+
         - name: COMMIT_MESSAGE
-          value: "ci: update TravelPortal image digest"
- 
+          value: "Update TravelPortal image"
+
       workspaces:
         - name: source
           workspace: source
- 
+
        # - name: git-credentials
        #   workspace: git-credentials
+
 ```
  
 apply:
@@ -2773,7 +2881,7 @@ spec:
   storageClassName: lab-gold-storage-policy
   resources:
     requests:
-      storage: 5Gi
+      storage: 1Gi
 ```
  
 apply:
@@ -2874,8 +2982,6 @@ spec:
       value: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
     - name: BUILDER_IMAGE
       value: paketobuildpacks/builder-jammy-base
-  taskRunTemplate:
-    serviceAccountName: tekton-pipeline-sa
   workspaces:
     - name: source
       persistentVolumeClaim:
@@ -2883,13 +2989,22 @@ spec:
     - name: dockerconfig
       secret:
         secretName: harbor-registry-secret
-        items:
-          - key: .dockerconfigjson
-            path: config.json
     - name: cosign-key
       secret:
         secretName: cosign-key
- 
+    - name: sbom
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: lab-gold-storage-policy
+          resources:
+            requests:
+              storage: 5Gi
+   # - name: git-credentials
+   #   secret:
+   #     secretName: github-push-secret
+
   taskRunSpecs:
     - pipelineTaskName: buildkit
       podTemplate:
