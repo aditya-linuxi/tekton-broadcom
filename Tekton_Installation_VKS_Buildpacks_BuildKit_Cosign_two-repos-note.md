@@ -20,10 +20,67 @@
 
 **Webhook:** An HTTP call the repository sends to the Tekton EventListener every time someone pushes code.
 
+**External DNS:** A Kubernetes component that automatically creates DNS records (here in Cloudflare) for exposed services, so the Tekton Dashboard is reached by a DNS name.
 
-> **Note:** Two repositories are used: GitHub for application source code and Gitea for the internal CI/GitOps workflow.
-> GitHub triggers the build, while Gitea stores the pipeline-updated `values.yaml`.
+## Architecture
 
+All of this — Tekton, BuildKit, Buildpacks, and Cosign — runs inside the VKS cluster itself. Nothing extra needs to be installed outside it. Everything after the developer's push happens automatically, with no manual steps.
+
+```text
+  Developer                              User (browser)
+      │ git push origin main                  │ https://<dashboard-dns-name>
+      ▼                                       ▼
+  Git repository                         Cloudflare DNS
+      │ webhook (POST)                        │ resolves to the Dashboard
+      ▼                                       ▼
+┌─────────────────────────────── VKS cluster ────────────────────────────────┐
+│                                                                            │
+│  ┌─ namespace: tekton-pipelines ────────────────────────────────────────┐  │
+│  │ Tekton Pipelines     Tekton Triggers     Tekton Dashboard  ◄── User  │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                            │
+│  ┌─ namespace: tanzu-system-service-discovery ──────────────────────────┐  │
+│  │ External DNS ─► creates the Dashboard DNS record in Cloudflare       │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                            │
+│  ┌─ namespace: cicd ────────────────────────────────────────────────────┐  │
+│  │ EventListener ─► CEL filter ─► TriggerBinding / TriggerTemplate      │  │
+│  │                       │ creates                                      │  │
+│  │                       ▼                                              │  │
+│  │ PipelineRun  (travelportal-pipeline-values-update)                   │  │
+│  │  1. clone         git-clone-update                                   │  │
+│  │  2. detect        detect-build-type (Dockerfile present?)            │  │
+│  │         ┌──── yes ────┴──── no ────┐                                 │  │
+│  │         ▼                          ▼                                 │  │
+│  │     BuildKit                  Buildpacks                             │  │
+│  │         └────────────┬─────────────┘                                 │  │
+│  │                      ▼                                               │  │
+│  │  3. sign          Syft SBOM ─► Cosign sign + attest (image digest)   │  │
+│  │  4. update-values commit image digest to helm-charts/values.yaml     │  │
+│  └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                            │
+│  ArgoCD ─► watches the Git repository ─► deploys the signed image to VKS   │
+└────────────────────────────────────────────────────────────────────────────┘
+      │ image + signature + SBOM            │ values.yaml commit (GitOps)
+      ▼                                     ▼
+   Harbor                             Git repository
+```
+
+| Step | What it means in plain words |
+|---|---|
+| Developer pushes code | The only thing a person actually has to do |
+| Webhook | The repository's call to Tekton on every push |
+| EventListener | Receives the webhook, filters it (main branch only, ignores the pipeline's own commits) and creates the PipelineRun |
+| Self-trigger filter | Stops the values.yaml commit from the last step from starting the pipeline again |
+| Tekton | The automation engine — runs the whole pipeline |
+| Dockerfile check | The one decision point: which tool builds the image |
+| BuildKit / Buildpacks | The two ways an image actually gets built (Dockerfile present → BuildKit, absent → Buildpacks) |
+| SBOM (ingredients list) | A record of everything that went into the image, for security and audit |
+| Cosign signing | Proves the image really came from our pipeline and hasn't been tampered with |
+| Harbor | Where images and OCI security artifacts are stored and scanned; signature enforcement depends on the configured security policy |
+| update-values (GitOps) | Writes the new image digest into the Helm values file in Git |
+| ArgoCD | Takes the newly signed image and rolls it out to the running application |
+| External DNS + Cloudflare | Publishes the DNS name used to open the Tekton Dashboard |
 
 ## Why use BuildKit and Buildpacks with Tekton on VKS?
 
@@ -43,10 +100,6 @@ One dashboard to watch it all. Tekton's Dashboard shows every build, whether it 
 
 A push starts the build by itself. The repository sends a webhook to Tekton Triggers, which creates the PipelineRun. Nobody has to start it manually, and commits made by the pipeline itself never start a second build.
 
-```text
-Application Source Code → Tekton → Buildpacks / BuildKit → Image + SBOM → Cosign Signing → Harbor
-```
-
 ## Benefits
 
 | Benefit | In simple words |
@@ -59,85 +112,9 @@ Application Source Code → Tekton → Buildpacks / BuildKit → Image + SBOM �
 | One place for images | Every built image lands in Harbor, where it's scanned, verified, and stored. |
 | Same steps everywhere | The same pipeline can be used offline after all required artifacts and dependencies have been mirrored into the environment. |
 | You can always prove what's running | Images are tracked by a fixed ID (a digest), not a name that can change, and each one has a matching signed ingredients list. |
-| One dashboard for visibility | Anyone can open the Tekton Dashboard and see the status of every build, without needing cluster access. |
+| One dashboard for visibility | Anyone can open the Tekton Dashboard by its DNS name and see the status of every build, without needing cluster access. |
 | Builds start on their own | A push to the main branch sends a webhook to Tekton Triggers, which creates the PipelineRun — no manual PipelineRun needed. |
 | No endless build loops | The commit the pipeline makes to update values.yaml is filtered out, so it does not trigger another build. |
-
-## Architecture
-
-All of this — Tekton, BuildKit, Buildpacks, and Cosign — runs inside the VKS cluster itself. Nothing extra needs to be installed outside it. Here's the whole journey from "developer pushes code" to "signed image is deployed" — everything after step 1 happens automatically, with no manual steps:
-
-```text
-1. Developer pushes code
-             │
-             ▼
- 2. Tekton wakes up (triggered by the push)
-             │
-             ▼
- 3. Tekton checks: does this repo have a Dockerfile?
-             │
-    ┌────────┴────────┐
-   Yes                 No
-    │                   │
-    ▼                   ▼
- 4a. BuildKit        4b. Buildpacks
- builds the image     builds the image
- (using the           (using paketo
-  Dockerfile)          builder-jammy-base)
-    │                   │
-    └────────┬──────────┘
-             ▼
- 5. An ingredients list (SBOM) is created for the image
-             │
-             ▼
- 6. The immutable image digest AND its SBOM are
-    signed/attested with Cosign
-             │
-             ▼
- 7. The image is pushed to Harbor
-    (Harbor stores/scans the image; Cosign stores the signature
-     and SBOM attestation in Harbor)
-             │
-             ▼
- 8. Harbor stores the image with a fixed ID (digest)
-             │
-             ▼
- 9. GitOps updates the deployment files, and ArgoCD
-    deploys the new, signed image onto VKS
-```
-
-| Step | What it means in plain words |
-|---|---|
-| Developer pushes code | The only thing a person actually has to do |
-| Tekton | The automation engine — watches for pushes and runs the whole pipeline |
-| Dockerfile check | The one decision point: which tool builds the image |
-| BuildKit / Buildpacks | The two ways an image actually gets built |
-| SBOM (ingredients list) | A record of everything that went into the image, for security and audit |
-| Cosign signing | Proves the image really came from our pipeline and hasn't been tampered with |
-| Harbor | Where images and OCI security artifacts are stored and scanned; signature enforcement depends on the configured security policy |
-| ArgoCD | Takes the newly signed image and rolls it out to the running application |
-| Webhook | The repository's call to Tekton on every push (step 1 → step 2) |
-| EventListener | Receives the webhook, filters it (main branch only, ignores the pipeline's own commits) and creates the PipelineRun |
-| Self-trigger filter | Stops the values.yaml commit from step 9 from starting the pipeline again |
-
-### How the push reaches Tekton (steps 1 and 2 in detail)
-
-```text
-Developer pushes code
-        │
-        ▼
-Repository sends a webhook (POST)
-        │
-        ▼
-EventListener (NodePort)
-        │
-        ├── CEL filter: main branch only, ignore CI commits
-        ├── TriggerBinding: reads repo URL, branch, commit
-        └── TriggerTemplate: creates the PipelineRun
-        │
-        ▼
-PipelineRun starts → step 3
-```
 
 ## Prerequisites
 
@@ -148,6 +125,7 @@ PipelineRun starts → step 3
 | VMware Cloud Foundation (VCF) | 9.x | Sets up and manages the Supervisor and workload clusters |
 | vSphere Kubernetes Service (VKS) | VCF 9.x bundled | Runs the actual Kubernetes workload cluster where builds happen |
 | Regional Harbor | Installed via VCF Automation / Supervisor Service | Stores, scans, and signs images |
+| External DNS + Cloudflare | Namespace `tanzu-system-service-discovery` | Creates the DNS record used to reach the Tekton Dashboard |
 | Tekton Pipelines | Latest version supported by your cluster | Runs the CI pipeline — the automation engine described above |
 | Tekton Dashboard | Same release train as Pipelines | The web page for watching build status |
 | Cosign | Latest stable | Signs images and their ingredients lists (SBOMs) |
@@ -158,71 +136,64 @@ PipelineRun starts → step 3
 
 ```bash
 kubectl version
-kubectl cluster-info
-kubectl get nodes -o wide
-
-docker --version    # optional, only needed for local testing
 helm version
 git --version
 curl --version
+docker --version    # optional, only needed for local testing
 ```
+
+## Manifest repository (where the YAML files live)
+
+To keep this document short, the YAML manifests are **not** pasted inline. Every manifest is stored in the repository below, and each section links directly to the file it needs.
+
+| Item | Location |
+|---|---|
+| Tekton pipeline and External DNS manifests | https://github.com/kondurupurandhar/keda-vks/tree/main/manifest/tekton-catalyst |
+| Test Task / TaskRun manifests | https://github.com/kondurupurandhar/keda-vks/tree/main/manifest/test-task |
+
+To get the Tekton pipeline and External DNS files at once:
+
+```bash
+git clone https://github.com/kondurupurandhar/keda-vks.git
+cd keda-vks/manifest/tekton-catalyst
+```
+
+> **Note:** The `keda-vks` repository is private. You need access to it before the links open or the clone works.
+
+> **Validation approach:** Each section ends with a single **Validation** block. Run the steps in the section first, then validate once at the end.
 
 ## Installation of Tekton on VKS – Internet Connected VKS
 
 Checked the current Tekton documentation. The current stable/LTS line is Tekton Pipelines v1.15.0, and Tekton's prerequisites include Kubernetes 1.28+, kubectl, and cluster-admin privileges.
 
-### First check your Kubernetes cluster
+### Pre-checks
+
+Confirm the cluster, its version, and your permissions:
 
 ```bash
-kubectl version #tekton version should compatible with k8s version
+kubectl version                       # Tekton version must be compatible with the Kubernetes version
 kubectl cluster-info
+kubectl config current-context        # confirm you are connected to the right cluster
+kubectl get nodes -o wide             # all nodes should be Ready
+
+kubectl auth can-i create customresourcedefinitions   # expected: yes
+kubectl auth can-i create clusterroles                # expected: yes
+kubectl auth can-i create namespaces                  # expected: yes
 ```
 
-### Check which cluster you are connected to
+### Check Internet connectivity
 
-```bash
-kubectl config current-context #to verify the cluster and its state
-kubectl get nodes
-```
+A successful ICMP ping is not required for Tekton installation and does not prove HTTPS connectivity. Test the actual endpoints.
 
-### Check your permissions
-
-```bash
-kubectl auth can-i create customresourcedefinitions
-```
-
-Expected: `yes`
-
-```bash
-kubectl auth can-i create clusterroles
-```
-
-Expected: `yes`
-
-```bash
-kubectl auth can-i create namespaces
-```
-
-Expected: `yes`
-
-### Check Internet connectivity from your workstation
-
-A successful ICMP ping is not required for Tekton installation and does not prove HTTPS connectivity. Test the actual endpoint used to download installation artifacts:
+From your workstation:
 
 ```bash
 curl -I https://infra.tekton.dev
-```
-
-You can also test the public registry endpoints you expect to use:
-
-```bash
 curl -I https://registry-1.docker.io/v2/
 curl -I https://ghcr.io/v2/
 ```
 
-### Check Internet connectivity from inside the VKS cluster
-
-`kubectl get nodes -o wide` only shows node information; it does not test internet access. Run an HTTP test from a Pod instead:
+From inside the VKS cluster (`kubectl get nodes -o wide` does not test internet access, so run an HTTP test from a Pod):
 
 ```bash
 kubectl run net-test --rm -it --restart=Never \
@@ -230,11 +201,9 @@ kubectl run net-test --rm -it --restart=Never \
   curl -I https://registry-1.docker.io/v2/
 ```
 
-If your cluster cannot pull `curlimages/curl`, use an already available diagnostic image or an existing Pod that contains `curl`.
+If your cluster cannot pull `curlimages/curl`, use an already available diagnostic image or an existing Pod that contains `curl`. A successful HTTP response confirms that a workload Pod can reach the external registry. Also verify DNS resolution and proxy/firewall rules when required by your VKS environment.
 
-A successful HTTP response confirms that a workload Pod can reach the external registry. Also verify DNS resolution and proxy/firewall rules when required by your VKS environment.
-
-Later, when we install Buildpacks/BuildKit, the worker nodes will need to pull images such as:
+Later, the worker nodes will need to pull images such as:
 
 ```text
 paketobuildpacks/builder-jammy-base
@@ -247,2540 +216,432 @@ moby/buildkit
 kubectl apply --filename https://infra.tekton.dev/tekton-releases/pipeline/latest/release.yaml
 ```
 
-You should see many resources being created, for example:
+Many resources are created (CRDs, the `tekton-pipelines` namespace, service accounts, cluster roles, and the controller and webhook deployments). Wait until the pods are ready.
 
-```text
-customresourcedefinition.apiextensions.k8s.io/... created
-namespace/tekton-pipelines created
-serviceaccount/... created
-clusterrole.rbac.authorization.k8s.io/... created
-deployment.apps/tekton-pipelines-controller created
-deployment.apps/tekton-pipelines-webhook created
-```
-
-### Immediately check the namespace
-
-```bash
-kubectl get namespace tekton-pipelines
-```
-
-Expected:
-
-```text
-NAME                STATUS   AGE
-tekton-pipelines    Active   ...
-```
-
-### Check Tekton pods
+### Validation – Tekton Pipelines
 
 ```bash
 kubectl get pods -n tekton-pipelines
-```
-
-Initially you may see:
-
-```text
-NAME                                      READY   STATUS
-tekton-pipelines-controller-xxxxx        0/1     ContainerCreating
-ekton-pipelines-webhook-xxxxx            0/1     ContainerCreating
-```
-
-Wait a little.
-
-Run again:
-
-```bash
-kubectl get pods -n tekton-pipelines
-```
-
-Eventually you want:
-
-```text
-NAME                                      READY   STATUS
-tekton-pipelines-controller-xxxxx        1/1     Running
-tekton-pipelines-webhook-xxxxx            1/1     Running
-```
-
-The official documentation says the installation is complete when the components show 1/1 under READY
-
-### Check all Tekton resources
-
-```bash
-kubectl get all -n tekton-pipelines
-```
-
-You should see:
-
-```text
-pods
-services
-deployments
-replicasets
-```
-
-For example:
-
-```text
-NAME                                           READY
-pod/tekton-pipelines-controller-xxxxx         1/1
-pod/tekton-pipelines-webhook-xxxxx            1/1
-```
-
-### Check Tekton API resources Check Tekton CRDs
-
-Tekton creates Kubernetes Custom Resource Definitions.
-
-Run:
-
-```bash
 kubectl get crd | grep tekton
-```
-
-You should see resources related to:
-
-```text
-tasks.tekton.dev
-taskruns.tekton.dev
-pipelines.tekton.dev
-pipelineruns.tekton.dev
-```
-
-These are the important building blocks.
-
-Conceptually:
-
-```text
-Task
-  ↓
-TaskRun
-
-Pipeline
-  ↓
-PipelineRun
-```
-
-```bash
 kubectl api-resources | grep tekton
-```
-
-You should see resources similar to:
-
-```text
-tasks
-taskruns
-pipelines
-pipelineruns
-```
-
-This confirms Kubernetes recognizes Tekton's API resources.
-
-### Check Tekton controller
-
-Run:
-
-```bash
-kubectl get deployment -n tekton-pipelines
-```
-
-Expected:
-
-```text
-NAME                          READY   UP-TO-DATE   AVAILABLE
-tekton-pipelines-controller   1/1     1            1
-tekton-pipelines-webhook      1/1     1            1
-```
-
-### Check controller logs
-
-If everything is Running, you can still verify the controller logs:
-
-```bash
 kubectl logs deployment/tekton-pipelines-controller -n tekton-pipelines --tail=50
 ```
 
-Look for errors such as:
+Expected result:
 
 ```text
-ERROR
-failed
-panic
-connection refused
+Nodes                         → Ready
+Namespace tekton-pipelines    → Active
+tekton-pipelines-controller   → 1/1 Running
+tekton-pipelines-webhook      → 1/1 Running
+CRDs                          → tasks, taskruns, pipelines, pipelineruns (tekton.dev) present
+Controller logs               → no ERROR / failed / panic / connection refused
 ```
 
-Normal startup messages are fine.
+## Integration for Pipeline creation + Tekton Dashboard
 
-### Check services
-
-Run:
-
-```bash
-kubectl get svc -n tekton-pipelines
-```
-
-You should see services associated with Tekton components.
-
-### Final installation validation
-
-Run these commands one by one:
-
-```bash
-kubectl get nodes
-kubectl get namespace tekton-pipelines
-kubectl get pods -n tekton-pipelines
-kubectl get deployments -n tekton-pipelines
-kubectl get crd | grep tekton
-kubectl api-resources | grep tekton
-```
-
-The important result is:
-
-```text
-VKS nodes             → Ready
-tekton-pipelines      → Active
-Tekton controller     → 1/1 Running
-Tekton webhook        → 1/1 Running
-Tekton CRDs           → Present
-```
-
-## Integration for Pipeline creation + Tekton Dashboard.
-
-For your Internet-connected VKS environment, I recommend this setup:
-
-```text
-VKS Cluster
-│
-├── tekton-pipelines
-│     ├── Tekton Controller
-│     └── Tekton Webhook
-│
-├── tekton-dashboard
-│     └── Tekton Dashboard
-│
-└── cicd
-      ├── Tasks
-      ├── Pipelines
-      └── PipelineRuns
-```
-
-### Verify Tekton Pipelines first
-
-Run:
-
-```bash
-kubectl get pods -n tekton-pipelines
-kubectl get crd | grep tekton
-```
+The Dashboard runs in the `tekton-pipelines` namespace. The application Tasks, Pipelines and PipelineRuns live in a separate `cicd` namespace.
 
 ### Create a namespace for your CI/CD objects
 
-Don't put your application Pipelines directly into `tekton-pipelines`.
-
-Create a separate namespace:
+Don't put your application Pipelines directly into `tekton-pipelines`. Create a separate namespace (used for the rest of this document):
 
 ```bash
 kubectl create namespace cicd
 ```
 
-Verify:
-
-```bash
-kubectl get namespace cicd
-```
-
-Expected:
-
-```text
-NAME    STATUS   AGE
-cicd    Active   ...
-```
-
-Your architecture is now:
-
-```text
-tekton-pipelines
-        |
-        | Tekton engine
-        v
-      cicd
-        |
-        +-- Tasks
-        +-- Pipelines
-        +-- PipelineRuns
-```
+If it already exists, `Error from server (AlreadyExists)` is fine.
 
 ### Install Tekton Dashboard
 
-Since your cluster has Internet access, use the official Tekton Dashboard release manifest.
-
-Run:
+Since your cluster has Internet access, use the official Tekton Dashboard release manifest:
 
 ```bash
 kubectl apply -f https://infra.tekton.dev/tekton-releases/dashboard/latest/release.yaml
 ```
 
-Tekton documents this as the installation method for Dashboard.
+The Dashboard is installed into the `tekton-pipelines` namespace.
 
-### Check Dashboard namespace
+### External DNS Configuration for Tekton Dashboard
 
-Run:
+The Tekton Dashboard is exposed using **External DNS with Cloudflare**. The required configuration files are maintained in the GitHub repository (`manifest/tekton-catalyst`). Apply them one by one, in the order below.
 
-```bash
-kubectl get namespace tekton-pipelines
-```
+#### 1. External DNS ClusterRole
 
-The Dashboard is normally installed into the Tekton namespace.
+Defines the RBAC permissions required by External DNS.
 
-Now check:
+File `cluster-roles.yaml`:
 
-```bash
-kubectl get pods -n tekton-pipelines
-```
-
-You should see something similar to:
-
-```text
-NAME                                      READY   STATUS
-tekton-pipelines-controller-xxxxx        1/1     Running
-tekton-pipelines-webhook-xxxxx            1/1     Running
-tekton-dashboard-xxxxx                    1/1     Running
-```
-
-The exact pod names will be different.
-
-### Check Dashboard deployment
-
-Run:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cluster-roles.yaml
 
 ```bash
-kubectl get deployment -n tekton-pipelines
+kubectl apply -f cluster-roles.yaml
 ```
 
-You should see:
+#### 2. External DNS ClusterRoleBinding
 
-```text
-NAME                          READY
-tekton-pipelines-controller   1/1
-tekton-pipelines-webhook      1/1
-tekton-dashboard              1/1
-```
+Binds the External DNS ServiceAccount to the ClusterRole.
 
-If tekton-dashboard isn't ready, don't continue to Pipeline testing yet.
+File `external-dns-clusterrolebinding.yaml`:
 
-### Check Dashboard service
-
-Run:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/external-dns-clusterrolebinding.yaml
 
 ```bash
-kubectl get svc -n tekton-pipelines
+kubectl apply -f external-dns-clusterrolebinding.yaml
 ```
 
-You should see a service similar to:
+#### 3. Cloudflare API token Secret
 
-```text
-NAME               TYPE        CLUSTER-IP      PORT(S)
-tekton-dashboard   ClusterIP   10.x.x.x        9097/TCP
-```
+Creates the Kubernetes Secret used to store the Cloudflare API token.
 
-For your initial implementation, don't expose it externally yet.
+File `secret.yaml`:
 
-change svc type to NodePort to access the dashboard ui
-
-Run:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/secret.yaml
 
 ```bash
-kubectl edit svc tekton-dashboard  -n tekton-pipelines
+kubectl apply -f secret.yaml
 ```
 
-change svc type to NodePort
+**Cloudflare API token:** The token must **not be committed to the GitHub repository**. `secret.yaml` contains only the placeholder `<CLOUDFLARE_API_TOKEN>` in the `api-token` key of the `external-dns-cloudflare` Secret (namespace `tanzu-system-service-discovery`). Replace the placeholder with the actual token before applying the Secret.
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  annotations:
-    kubectl.kubernetes.io/last-applied-configuration: |
-      {"apiVersion":"v1","kind":"Service","metadata":{"annotations":{},"labels":{"app":"tekton-dashboard","app.kubernetes.io/component":"dashboard","app.kubernetes.io/instance":"default","app.kubernetes.io/name":"dashboard","app.kubernetes.io/part-of":"tekton-dashboard","app.kubernetes.io/version":"v0.72.0","dashboard.tekton.dev/release":"v0.72.0","version":"v0.72.0"},"name":"tekton-dashboard","namespace":"tekton-pipelines"},"spec":{"ports":[{"name":"http","port":9097,"protocol":"TCP","targetPort":9097}],"selector":{"app.kubernetes.io/component":"dashboard","app.kubernetes.io/instance":"default","app.kubernetes.io/name":"dashboard","app.kubernetes.io/part-of":"tekton-dashboard"}}}
-  creationTimestamp: "2026-09-17T14:19:59Z"
-  labels:
-    app: tekton-dashboard
-    app.kubernetes.io/component: dashboard
-    app.kubernetes.io/instance: default
-    app.kubernetes.io/name: dashboard
-    app.kubernetes.io/part-of: tekton-dashboard
-    app.kubernetes.io/version: v0.72.0
-    dashboard.tekton.dev/release: v0.72.0
-    version: v0.72.0
-  name: tekton-dashboard
-  namespace: tekton-pipelines
-  resourceVersion: "229775"
-  uid: 155bd1de-e1d9-40e0-bf55-8e25bf0fae37
-spec:
-  clusterIP: 198.62.134.202
-  clusterIPs:
-  - 198.62.134.202
-  externalTrafficPolicy: Cluster
-  internalTrafficPolicy: Cluster
-  ipFamilies:
-  - IPv4
-  ipFamilyPolicy: SingleStack
-  ports:
-  - name: http
-    nodePort: 30583
-    port: 9097
-    protocol: TCP
-    targetPort: 9097
-  selector:
-    app.kubernetes.io/component: dashboard
-    app.kubernetes.io/instance: default
-    app.kubernetes.io/name: dashboard
-    app.kubernetes.io/part-of: tekton-dashboard
-  sessionAffinity: None
-  type: NodePort
-status:
-  loadBalancer: {}
+#### 4. External DNS configuration
+
+Configures External DNS with the Cloudflare provider, domain filter, DNS sources, and TXT registry.
+
+File `external-dns-values.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/external-dns-values.yaml
+
+```bash
+kubectl apply -f external-dns-values.yaml
 ```
 
-save
+#### 5. Cloudflare API token overlay
 
-ACCESS the dashboard using the <node ip : nodeport>
+Injects the Cloudflare API token from the Kubernetes Secret into the External DNS Deployment.
 
-Open:
+File `cloudflare-secret-overlay.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret-overlay.yaml
+
+```bash
+kubectl apply -f cloudflare-secret-overlay.yaml
+```
+
+### Validation – Tekton Dashboard and External DNS
+
+```bash
+kubectl get pods,deployment,svc -n tekton-pipelines | grep dashboard
+kubectl get pods -n tanzu-system-service-discovery
+kubectl logs -n tanzu-system-service-discovery \
+  -l app.kubernetes.io/name=external-dns
+```
+
+Expected result:
 
 ```text
-http://<node-ip>:30583
+tekton-dashboard pod/deployment → 1/1 Running
+External DNS pod                → Running, no errors in the logs
+Cloudflare                      → the expected Tekton Dashboard DNS record exists
 ```
 
-You should now see: Tekton Dashboard
+Open the Dashboard using the configured external DNS name. You should see the Tekton Dashboard. If `tekton-dashboard` isn't ready, don't continue to Pipeline testing yet.
 
-This is your first integration validation.
+For production, also configure HTTPS, authentication, RBAC, and network restrictions for the Dashboard.
 
-production environment, we can expose it through:
+### Test Task and TaskRun
 
-```text
-Internet/User
-      |
-      v
-Ingress / LoadBalancer
-      |
-      v
-Tekton Dashboard
-```
+Before creating your actual Buildpacks/BuildKit Pipeline, verify that Tekton can execute a Task. A Task is the definition; a TaskRun actually executes it.
 
-and configure:
+Task file `test-task.yaml`:
 
-```text
-HTTPS
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/test-task/test-task.yaml
 
-DNS
-authentication
-RBAC
-network restrictions
-```
+TaskRun file `taskrun.yaml`:
 
-### Create a simple test Task
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/test-task/taskrun.yaml
 
-Before creating your actual Buildpacks/BuildKit Pipeline, we should verify that Tekton can execute a Task.
-
-Create a file: `test-task.yaml`
-
-Put:
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: hello-task
-  namespace: cicd
-spec:
-  steps:
-    - name: hello
-      image: alpine:3.20
-      script: |
-        #!/bin/sh
-        echo "Hello from Tekton!"
-        echo "Tekton Pipeline integration is working."
-```
-
-Apply the Task
-
-Run:
+Apply both:
 
 ```bash
 kubectl apply -f test-task.yaml
+kubectl apply -f taskrun.yaml
 ```
 
-Expected:
-
-```text
-task.tekton.dev/hello-task created
-```
-
-Verify:
+### Validation – Test Task and TaskRun
 
 ```bash
-kubectl get tasks -n cicd
-```
-
-Expected:
-
-```text
-NAME          AGE
-hello-task    ...
-```
-
-### Create TaskRun
-
-A Task is the definition. A TaskRun actually executes it.
-
-Create: `hello-taskrun.yaml`
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: TaskRun
-metadata:
-  name: hello-taskrun
-  namespace: cicd
-spec:
-  taskRef:
-    name: hello-task
-```
-
-Apply:
-
-```bash
-kubectl apply -f hello-taskrun.yaml
-```
-
-### Check TaskRun
-
-Run:
-
-```bash
-kubectl get taskrun -n cicd
-```
-
-You should eventually see:
-
-```text
-NAME            SUCCEEDED   REASON
-hello-taskrun   True        Succeeded
-```
-
-You can also watch it:
-
-```bash
-kubectl get taskrun -n cicd -w
-```
-
-### Check Task logs
-
-Run:
-
-```bash
+kubectl get task,taskrun -n cicd
 kubectl logs -l tekton.dev/taskRun=hello-taskrun -n cicd
 ```
 
-You should see:
+Expected result:
 
 ```text
+hello-taskrun   SUCCEEDED=True   REASON=Succeeded
+
 Hello from Tekton!
 Tekton Pipeline integration is working.
 ```
 
-If that works, the basic Tekton execution engine is working.
-
-### See the TaskRun in Dashboard
-
-Go back to the Dashboard using the NodePort URL:
-
-```text
-http://<node-ip>:30583
-```
-
-Select: Namespace → cicd
-
-You should be able to see the Task/TaskRun.
-
-This confirms:
-
-```text
-Browser
-   |
-   v
-Tekton Dashboard
-   |
-   v
-Tekton API
-   |
-   v
-TaskRun
-   |
-   v
-Kubernetes Pod
-```
+In the Dashboard (opened by its DNS name), select Namespace → `cicd`. The Task and TaskRun should be visible.
 
 # Tekton pipeline setup with Buildpacks, BuildKit, and Cosign
 
-## Final architecture
+## Prepare the namespace
 
-```text
-         Git repository
-                           |
-                           v
-              +-----------------------+
-              | Tekton Pipeline       |
-              | namespace: cicd       |
-              +-----------+-----------+
-                          |
-                          v
-                   Clone repository
-                          |
-                          v
-                  Check Dockerfile
-                     /          \
-                    /            \
-             Dockerfile          No Dockerfile
-                 exists               |
-                    |                 |
-                    v                 v
-               BuildKit          Buildpacks
-                    |                 |
-                    +--------+--------+
-                             |
-                             v
-                       OCI Image
-                             |
-                             v
-                         SBOM
-                             |
-                             v
-                    +----------------+
-                    |    Cosign      |
-                    |                |
-                    | Sign image     |
-                    | Sign/attest    |
-                    | SBOM           |
-                    +-------+--------+
-                            |
-                            v
-                    Local Harbor
-                            |
-                            v
-              Signed Image Digest + SBOM Attestation
-```
-
-## Prerequisites
-
-```text
-VKS cluster
-Tekton Pipelines
-Tekton Dashboard
-kubectl
-Internet connectivity
-```
-
-First check:
-
-```bash
-kubectl get nodes
-```
-
-Then:
-
-```bash
-kubectl get pods -n tekton-pipelines
-```
-
-You want Tekton components to be Running.
-
-### Create a namespace
-
-Recommend using your own namespace rather than default.
-
-Run:
-
-```bash
-kubectl create namespace cicd
-```
-
-If it already exists:
-
-```text
-Error from server (AlreadyExists)
-```
-
-that's fine.
-
-Verify:
-
-```bash
-kubectl get namespace cicd
-```
-
-Label the namespace:
+The `cicd` namespace was created in the previous section. Label it for the build workloads:
 
 ```bash
 kubectl label namespace cicd pod-security.kubernetes.io/enforce=privileged --overwrite
+```
 
 > **Security note:** This lab label enables privileged capabilities. In production, use the least-privilege settings supported by your VKS/BuildKit/Buildpacks implementation and security policy.
-```
 
 ## Tasks
 
-### Task creation
-
-## Git-Clone update task
-
-`git-clone-update` is a Tekton Task used to clone source code from a Git repository into a shared workspace. It cleans the workspace, clones the required branch/revision, and validates the Git repository. The cloned source code is then used by BuildKit or Buildpacks to build the container image.
+Create each Task below by applying its manifest. A single validation at the end of this section checks all of them.
 
 ### git-clone-update
 
-Create `git-clone-update-task.yaml`
+`git-clone-update` is a Tekton Task used to clone source code from a Git repository into a shared workspace. It cleans the workspace, clones the required branch/revision, and validates the Git repository. The cloned source code is then used by BuildKit or Buildpacks to build the container image.
 
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
+File `git-clone-update-task.yaml`:
 
-metadata:
-  name: git-clone-update
-  namespace: cicd
-
-spec:
-  description: Clone a Git repository
-
-  params:
-    - description: Git repository URL
-      name: url
-      type: string
-
-    - default: main
-      description: Git branch, tag, or commit
-      name: revision
-      type: string
-
-    - default: "true"
-      description: Delete existing workspace contents
-      name: deleteExisting
-      type: string
-
-  steps:
-    - computeResources: {}
-      image: alpine/git:latest
-      name: clone
-
-      script: |
-        #!/bin/sh
-        set -eu
-
-        WORKSPACE="$(workspaces.output.path)"
-
-        echo "========================================"
-        echo "Git Clone"
-        echo "========================================"
-        echo "Workspace: ${WORKSPACE}"
-        echo "Repository: $(params.url)"
-        echo "Revision:   $(params.revision)"
-        echo ""
-
-        echo "Cleaning workspace..."
-        rm -rf "${WORKSPACE}"/*
-        rm -rf "${WORKSPACE}"/.[!.]*
-        rm -rf "${WORKSPACE}"/..?*
-
-        if [ "$(workspaces.git-credentials.bound)" = "true" ]; then
-          GIT_USERNAME="$(cat $(workspaces.git-credentials.path)/username)"
-          GIT_TOKEN="$(cat $(workspaces.git-credentials.path)/token)"
-          git config --global credential.helper '!f() { printf "username=%s\npassword=%s\n" "$GIT_USERNAME" "$GIT_TOKEN"; }; f'
-          echo "Repository credentials configured."
-        fi
-
-        echo "Cloning repository..."
-        git clone \
-          --branch "$(params.revision)" \
-          --depth 1 \
-          "$(params.url)" \
-          "${WORKSPACE}"
-
-        echo "========================================"
-        echo "Repository cloned successfully"
-        echo "========================================"
-
-        echo "Repository contents:"
-        ls -la "${WORKSPACE}"
-
-        echo ""
-        echo "========================================"
-        echo "Configuring Git safe.directory"
-        echo "========================================"
-
-        git config --global --add safe.directory "${WORKSPACE}"
-
-        echo "safe.directory configured:"
-        git config --global --get-all safe.directory
-
-        echo ""
-        echo "========================================"
-        echo "Git status"
-        echo "========================================"
-
-        cd "${WORKSPACE}"
-        git status
-
-        echo ""
-        echo "========================================"
-        echo "Git Clone Completed"
-        echo "========================================"
-
-  workspaces:
-    - description: Workspace where the Git repository will be cloned
-      name: output
-    - description: Optional Git credentials containing username and token
-      name: git-credentials
-      optional: true
-```
-
-apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/git-clone-update-task.yaml
 
 ```bash
 kubectl apply -f git-clone-update-task.yaml
 ```
 
-verify:
-
-```bash
-kubectl get task git-clone-update -n cicd
-```
-
-## detect-build-type task
+### detect-build-type
 
 `detect-build-type` is a Tekton Task that checks whether the source repository contains a Dockerfile. It selects BuildKit when a Dockerfile exists, otherwise it selects Cloud Native Buildpacks. The selected build type is stored as a Tekton result for the next pipeline task to use.
 
-### detect-build-type
+File `detect-build-type.yaml`:
 
-Create `detect-build-type.yaml`
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
-
-metadata:
-  name: detect-build-type
-  namespace: cicd
-
-spec:
-  workspaces:
-    - name: source
-
-  results:
-    - name: BUILD_TYPE
-      description: "Build type: buildkit or buildpack"
-
-  steps:
-    - name: detect
-      image: alpine:3.20
-
-      script: |
-        #!/bin/sh
-        set -eu
-
-        echo "Checking source repository..."
-
-        cd "$(workspaces.source.path)"
-
-        if [ -f Dockerfile ]; then
-          echo "Dockerfile found."
-          echo "Using BuildKit."
-
-          printf "buildkit" > "$(results.BUILD_TYPE.path)"
-        else
-          echo "Dockerfile not found."
-          echo "Using Buildpacks."
-
-          printf "buildpack" > "$(results.BUILD_TYPE.path)"
-        fi
-```
-
-apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/detect-build-type.yaml
 
 ```bash
-kubectl apply -f detect-build-type-task.yaml
+kubectl apply -f detect-build-type.yaml
 ```
 
-verify:
+### buildpacks-phases
+
+A ready-made Tekton Task that builds an image from source code using Cloud Native Buildpacks. It builds the image when there is no Dockerfile.
+
+File `buildpacks-phase-task.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/buildpacks-phase-task.yaml
 
 ```bash
-kubectl get task detect-build-type -n cicd
+kubectl apply -f buildpacks-phase-task.yaml -n cicd
 ```
-
-## Buildpacks Task
-
-Buildpacks: Phases Task A ready-made Tekton Task that builds an image from source code. Builds the image when there is no Dockerfile.
-
-### Buildpacks-phases
-
-Create `buildpacks-phases.yaml`
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
-metadata:
-  name: buildpacks-phases
-  labels:
-    app.kubernetes.io/version: "0.3"
-  annotations:
-    tekton.dev/categories: Image Build, Security
-    tekton.dev/pipelines.minVersion: "0.62.0"
-    tekton.dev/tags: image-build
-    tekton.dev/displayName: "Buildpacks phases"
-    tekton.dev/platforms: "linux/amd64"
-spec:
-  description: >-
-    The Buildpacks-Phases task builds source into a container image and pushes it to
-    a registry, using Cloud Native Buildpacks - https://buildpacks.io/. This task separately calls the aspects of the
-    Cloud Native Buildpacks lifecycle, to provide increased security via container isolation.
- 
-    When the builder image includes extensions (= Dockerfiles), then this task will execute them.
-    That allows to by example install packages, rpm, etc and to customize the build process according to your needs.
- 
-    This task supports the Platform spec 0.13: https://github.com/buildpacks/spec/blob/platform/v0.13/platform.md
- 
-  workspaces:
-    - name: source
-      description: Directory where application source is located.
-    - name: cache
-      description: Directory where cache is stored (when no cache image is provided).
-      optional: true
-    - name: dockerconfig
-      description: Docker config for registry authentication.
-      optional: true
- 
-  params:
-    - name: CNB_BUILD_IMAGE
-      description: Reference to the current build image in an OCI registry.
-      default: ""
-    - name: CNB_BUILDER_IMAGE
-      description: The Builder image which includes the lifecycle tool, the buildpacks and metadata.
-    - name: CNB_CACHE_IMAGE
-      description: Reference to a cache image in an OCI registry (if no cache workspace is provided).
-      default: ""
-    - name: CNB_ENV_VARS
-      type: array
-      description: Environment variables to set during _build-time_.
-      default: []
-    - name: CNB_EXPERIMENTAL_MODE
-      description: Control the lifecycle's execution according to the mode silent, warn, error for the experimental features.
-      default: silent
-    - name: CNB_GROUP_ID
-      description: The group ID of the builder image user.
-      default: ""
-    - name: CNB_INSECURE_REGISTRIES
-      description: List of registries separated by a comma having a self-signed certificate where TLS verification will be skipped.
-      default: ""
-    - name: CNB_LAYERS_DIR
-      description: Path to layers directory
-      default: "/layers"
-    - name: CNB_LOG_LEVEL
-      description: Logging level values info, warning, error, debug
-      default: "info"
-    - name: CNB_PLATFORM_API_SUPPORTED
-      description: Buildpacks Platform API supported by the Tekton task
-      default: "0.13"
-    - name: CNB_PLATFORM_API
-      description: User's Buildpacks Platform API
-      default: ""
-    - name: CNB_PLATFORM_DIR
-      description: Path to the platform directory
-      default: "/platform"
-    - name: CNB_PROCESS_TYPE
-      description: Default process type to set in the exported image
-      # making it emppty so that buildpack pack can assign web
-      default: ""
-    - name: CNB_RUN_IMAGE
-      description: Reference to an image which is packaging the application runtime to be launched.
-      default: ""
-    - name: CNB_SKIP_LAYERS
-      description: Do not restore SBOM layer from previous image
-      default: false
-    # DEPRECATED: It does not make sense to support such an env variable as mounting the unix docker socket part of a pod from a host volume
-    # will never happen for security reason
-    # - name: CNB_USE_DAEMON
-    #  description: Analyze image from docker daemon
-    #  default: false
-    - name: CNB_USER_ID
-      description: The user ID of the builder image user.
-      default: ""
- 
-    - name: APP_IMAGE
-      description: The name of the container image for your application.
-    - name: SOURCE_SUBPATH
-      description: A subpath within the `source` input where the source to build is located.
-      default: ""
-    - name: TAGS
-      description: Additional tag to apply to the exported image
-      default: ""
-    - name: USER_HOME
-      description: Absolute path to the user's home directory.
-      default: /tekton/home
-    - name: INSPECT_TOOLS_IMAGE
-      description: Image packaging tools like skopeo and jq to inspect the builder images
-      default: quay.io/halkyonio/skopeo-jq:0.1.3@sha256:1b3d21ad541227dc9d3e793d18cef9eb00a969c0c01eb09cab88997bc63680c6
- 
-  results:
-    - name: APP_IMAGE_DIGEST
-      description: The digest of the built `APP_IMAGE`.
- 
-  stepTemplate:
-    env:
-      - name: CNB_EXPERIMENTAL_MODE
-        value: $(params.CNB_EXPERIMENTAL_MODE)
-      - name: HOME
-        value: $(params.USER_HOME)
-      - name: DOCKER_CONFIG
-        value: /tekton/home/.docker
-  steps:
-    - name: get-labels-and-env
-      image: $(params.INSPECT_TOOLS_IMAGE)
-      onError: stopAndFail
-      env:
-        - name: PARAM_VERBOSE
-          value: $(params.CNB_LOG_LEVEL)
-        - name: PARAM_BUILDER_IMAGE
-          value: $(params.CNB_BUILDER_IMAGE)
-        - name: PARAM_CNB_PLATFORM_API
-          value: $(params.CNB_PLATFORM_API)
-        - name: PARAM_CNB_PLATFORM_API_SUPPORTED
-          value: $(params.CNB_PLATFORM_API_SUPPORTED)
-      results:
-        - name: UID
-          description: UID of the user specified in the Builder image
-        - name: GID
-          description: GID of the user specified in the Builder image
-        - name: EXTENSION_LABELS
-          description: "Extensions labels: io.buildpacks.extension.layers defined in the Builder image"
-        - name: CNB_PLATFORM_API
-          description: The CNB_PLATFORM_API to be used by lifecycle and verified against the one supported by this task
-      script: |
-        #!/usr/bin/env bash
-        set -eu
- 
-        if [ "${PARAM_VERBOSE}" = "debug" ] ; then
-          set -x
-        fi
-        echo "Creating the path for docker.."
-        mkdir -p /tekton/home/.docker
-
-        echo "--> Copying registry credentials"
-        if [[ -f "$(workspaces.dockerconfig.path)/.dockerconfigjson" ]]; then
-          cp "$(workspaces.dockerconfig.path)/.dockerconfigjson" "/tekton/home/.docker/config.json"
-          echo "Copied .dockerconfigjson to /tekton/home/.docker/config.json"
-        elif [[ -f "$(workspaces.dockerconfig.path)/config.json" ]]; then
-          cp "$(workspaces.dockerconfig.path)/config.json" "/tekton/home/.docker/config.json"
-          echo "Copied config.json to /tekton/home/.docker/config.json"
-        elif [[ -f "$(workspaces.source.path)/$(params.SOURCE_SUBPATH)/.docker/config.json" ]]; then
-          cp "$(workspaces.source.path)/$(params.SOURCE_SUBPATH)/.docker/config.json" "/tekton/home/.docker/config.json"
-          echo "Copied repository .docker/config.json"
-        fi
-
-        if [[ -f "$HOME/.docker/config.json" ]]; then
-          printf %"s\n" "The docker config.json file exists !"
-        else
-          printf %"s\n" "!!!!! Warning: No registry credentials file exists. The task may fail when pushing to a private registry. !!!!!"
-        fi
- 
-        printf %"s\n" "Remove the @sha from the image as not supported by skopeo to inspect an image"
-        CLEANED_IMAGE="${PARAM_BUILDER_IMAGE%@*}"
- 
-        EXT_LABEL_1="io.buildpacks.extension.layers"
-        EXT_LABEL_2="io.buildpacks.buildpack.order-extensions"
-        BUILDER_LABEL="io.buildpacks.builder.metadata"
- 
-        IMG_MANIFEST=$(skopeo inspect --authfile $HOME/.docker/config.json "docker://${CLEANED_IMAGE}")
- 
-        #
-        # The following test should be reviewed as :
-        #
-        # 1) we get from non ubi images a {} value as you can see hereafter
-        #   "io.buildpacks.extension.layers": "{}",
-        #
-        # 2) Do we have to check the content of this label too ?
-        #    "io.buildpacks.buildpack.order-extensions": "null",
-        #
- 
-        IMG_LABELS=$(echo $IMG_MANIFEST | jq -e '.Labels')
- 
-        if [[ $(echo "$IMG_LABELS" | jq -r '.['\"'${BUILDER_LABEL}'\"]') != "{}" ]] > /dev/null; then
-          printf %"s\n" "## The builder image ${PARAM_BUILDER_IMAGE} includes the label: \"${BUILDER_LABEL}\" :"
- 
-          builderLabel=$(echo -n "$IMG_LABELS" | jq -r '.['\"'${BUILDER_LABEL}'\"]')
-          platforms=($(echo $builderLabel | jq -r '.lifecycle.apis.platform.supported'))
-          printf %"s\n" "Lifecycle platforms API supported: ${platforms[@]}"
- 
-          CNB_PLATFORM_API=${PARAM_CNB_PLATFORM_API:-$PARAM_CNB_PLATFORM_API_SUPPORTED}
-          echo "Platform API selected: $CNB_PLATFORM_API"
-          printf %"s\n" "Platform API supported by this task: $PARAM_CNB_PLATFORM_API_SUPPORTED"
- 
-          if [[ "${platforms[@]}" =~ "$CNB_PLATFORM_API" && "$CNB_PLATFORM_API" == "$PARAM_CNB_PLATFORM_API_SUPPORTED" ]]; then
-              echo -n "$CNB_PLATFORM_API" > "$(step.results.CNB_PLATFORM_API.path)"
-              printf %"s\n" "$CNB_PLATFORM_API is in the list of the platform supported by lifecycle like also this Tekton task :-)"
-          else
-              echo "$PARAM_CNB_PLATFORM_API is not in the list of the supported platform by lifecycle or is not supported by this tekton task: ${PARAM_CNB_PLATFORM_API_SUPPORTED} !"
-              exit 1
-          fi
-        fi
- 
-        if [[ $(echo "$IMG_LABELS" | jq -r '.['\"'${EXT_LABEL_1}'\"]') != "{}" ]] > /dev/null; then
-          echo "## The builder image ${PARAM_BUILDER_IMAGE} includes some extensions as the extension label \"${EXT_LABEL_1}\" is NOT empty:"
-          echo -n "$IMG_LABELS" | jq -r '.['\"'${EXT_LABEL_1}'\"]' | tee "$(step.results.EXTENSION_LABELS.path)"
-          echo ""
-        else
-          echo "## The builder image ${PARAM_BUILDER_IMAGE} dot not include extensions as the extension label \"${EXT_LABEL_1}\" is empty !"
-          echo -n "empty" | tee "$(step.results.EXTENSION_LABELS.path)"
-        fi
- 
-        CNB_USER_ID=$(echo $IMG_MANIFEST | jq -r '.Env' | jq -r '.[] | select(test("^CNB_USER_ID="))'  | cut -d '=' -f 2)
-        CNB_GROUP_ID=$(echo $IMG_MANIFEST | jq -r '.Env' | jq -r '.[] | select(test("^CNB_GROUP_ID="))' | cut -d '=' -f 2)
- 
-        echo "## The CNB_USER_ID & CNB_GROUP_ID defined within the builder image: ${PARAM_BUILDER_IMAGE} are:"
-        echo -n "$CNB_USER_ID"  | tee "$(step.results.UID.path)"
-        echo ""
-        echo -n "$CNB_GROUP_ID" | tee "$(step.results.GID.path)"
- 
-    - name: prepare
-      image: registry.access.redhat.com/ubi8/ubi-minimal@sha256:b2a1bec3dfbc7a14a1d84d98934dfe8fdde6eb822a211286601cf109cbccb075
-      args:
-        - "--env-vars"
-        - "$(params.CNB_ENV_VARS[*])"
-      env:
-        - name: CNB_USER_ID
-          value: $(steps.get-labels-and-env.results.UID)
-        - name: CNB_GROUP_ID
-          value: $(steps.get-labels-and-env.results.GID)
-      script: |
-        #!/usr/bin/env bash
-        set -eu
- 
-        echo "CNB UID: $CNB_USER_ID"
-        echo "CNB GID: $CNB_GROUP_ID"
- 
-        if [[ "$(workspaces.cache.bound)" == "true" ]]; then
-          echo "--> Setting permissions on '$(workspaces.cache.path)'..."
-          chown -R "$CNB_USER_ID:$CNB_GROUP_ID" "$(workspaces.cache.path)"
-        fi
- 
-        echo "--> Creating .docker folder"
-        mkdir -p "/tekton/home/.docker"
- 
-        for path in "/tekton/home" "/tekton/home/.docker" "/tekton/creds" "/layers" "$(workspaces.source.path)"; do
-          echo "--> Setting permissions on '$path'..."
-          chown -R "$CNB_USER_ID:$CNB_GROUP_ID" "$path"
-        done
- 
-        echo "--> Parsing additional configuration..."
-        parsing_flag=""
-        envs=()
-        for arg in "$@"; do
-            if [[ "$arg" == "--env-vars" ]]; then
-                echo "-> Parsing env variables..."
-                parsing_flag="env-vars"
-            elif [[ "$parsing_flag" == "env-vars" ]]; then
-                envs+=("$arg")
-            fi
-        done
- 
-        echo "--> Processing any environment variables..."
-        ENV_DIR="/platform/env"
- 
-        echo "--> Creating 'env' directory: $ENV_DIR"
-        mkdir -p "$ENV_DIR"
- 
-        for env in "${envs[@]}"; do
-            IFS='=' read -r key value string <<< "$env"
-            if [[ "$key" != "" && "$value" != "" ]]; then
-                path="${ENV_DIR}/${key}"
-                echo "--> Writing ${path}..."
-                echo -n "$value" > "$path"
-            fi
-        done
-        echo "--> Content of $(params.CNB_PLATFORM_DIR)/env"
-        ls -la $(params.CNB_PLATFORM_DIR)/env
- 
-        echo "--> Show the project cloned within the workspace ..."
-        ls -la $(workspaces.source.path)/$(params.SOURCE_SUBPATH)
- 
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
-        - name: platform-dir
-          mountPath: $(params.CNB_PLATFORM_DIR)
- 
-    - name: analyze
-      image: $(params.CNB_BUILDER_IMAGE)
-      imagePullPolicy: Always
-      command: ["/cnb/lifecycle/analyzer"]
-      env:
-        - name: CNB_PLATFORM_API
-          value: $(steps.get-labels-and-env.results.CNB_PLATFORM_API)
-      args:
-        - "-log-level=$(params.CNB_LOG_LEVEL)"
-        - "-layers=$(params.CNB_LAYERS_DIR)"
-        - "-run-image=$(params.CNB_RUN_IMAGE)"
-        - "-cache-image=$(params.CNB_CACHE_IMAGE)"
-        - "-uid=$(steps.get-labels-and-env.results.UID)"
-        - "-gid=$(steps.get-labels-and-env.results.GID)"
-        - "-insecure-registry=$(params.CNB_INSECURE_REGISTRIES)"
-        - "-tag=$(params.TAGS)"
-        - "-skip-layers=$(params.CNB_SKIP_LAYERS)"
-        - "$(params.APP_IMAGE)"
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
- 
-    - name: detect
-      image: $(params.CNB_BUILDER_IMAGE)
-      imagePullPolicy: Always
-      command: ["/cnb/lifecycle/detector"]
-      env:
-        - name: CNB_PLATFORM_API
-          value: $(steps.get-labels-and-env.results.CNB_PLATFORM_API)
-      args:
-        - "-log-level=$(params.CNB_LOG_LEVEL)"
-        - "-app=$(workspaces.source.path)/$(params.SOURCE_SUBPATH)"
-        - "-group=/layers/group.toml"
-        - "-plan=/layers/plan.toml"
-        - "-layers=$(params.CNB_LAYERS_DIR)"
-        - "-platform=$(params.CNB_PLATFORM_DIR)"
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
-        - name: platform-dir
-          mountPath: $(params.CNB_PLATFORM_DIR)
-        - name: tekton-home-dir
-          mountPath: /tekton/home
- 
-    - name: restore
-      image: $(params.CNB_BUILDER_IMAGE)
-      imagePullPolicy: Always
-      env:
-        - name: UID
-          value: $(steps.get-labels-and-env.results.UID)
-        - name: GID
-          value: $(steps.get-labels-and-env.results.GID)
-        - name: CNB_LOG_LEVEL
-          value: $(params.CNB_LOG_LEVEL)
-        - name: CNB_BUILD_IMAGE
-          value: $(params.CNB_BUILD_IMAGE)
-        - name: CNB_BUILDER_IMAGE
-          value: $(params.CNB_BUILDER_IMAGE)
-        - name: CNB_CACHE_IMAGE
-          value: $(params.CNB_CACHE_IMAGE)
-        - name: CNB_INSECURE_REGISTRIES
-          value: $(params.CNB_INSECURE_REGISTRIES)
-        - name: CNB_SKIP_LAYERS
-          value: $(params.CNB_SKIP_LAYERS)
-        - name: CNB_PLATFORM_API
-          value: $(steps.get-labels-and-env.results.CNB_PLATFORM_API)
-      script: |
-        #!/usr/bin/env bash
-        export BUILD_IMAGE=${CNB_BUILD_IMAGE:-${CNB_BUILDER_IMAGE}}
-        /cnb/lifecycle/restorer \
-          -log-level=${CNB_LOG_LEVEL} \
-          -build-image=${BUILD_IMAGE} \
-          -group=/layers/group.toml \
-          -layers=${CNB_LAYERS_DIR} \
-          -cache-dir=$(workspaces.cache.path) \
-          -cache-image=${CNB_CACHE_IMAGE} \
-          -uid=${UID} \
-          -gid=${GID} \
-          -insecure-registry=${CNB_INSECURE_REGISTRIES} \
-          -skip-layers=${CNB_SKIP_LAYERS}
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
- 
-    - name: extender
-      when:
-        - input: $(steps.get-labels-and-env.results.EXTENSION_LABELS)
-          operator: notin
-          values: ["empty"]
-      image: $(params.CNB_BUILDER_IMAGE)
-      imagePullPolicy: Always
-      command: ["/cnb/lifecycle/extender"]
-      env:
-        - name: CNB_PLATFORM_API
-          value: $(steps.get-labels-and-env.results.CNB_PLATFORM_API)
-      args:
-        - "-log-level=$(params.CNB_LOG_LEVEL)"
-        - "-app=$(workspaces.source.path)/$(params.SOURCE_SUBPATH)"
-        - "-generated=/layers/generated"
-        - "-uid=$(steps.get-labels-and-env.results.UID)"
-        - "-gid=$(steps.get-labels-and-env.results.GID)"
-        - "-platform=$(params.CNB_PLATFORM_DIR)"
-      securityContext:
-        runAsUser: 0
-        runAsGroup: 0
-        capabilities:
-          add:
-            - "SYS_ADMIN"
-            - "SETFCAP"
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
-        - name: tekton-home-dir
-          mountPath: /tekton/home
-        - name: platform-dir
-          mountPath: $(params.CNB_PLATFORM_DIR)
- 
-    - name: build
-      when:
-        - input: $(steps.get-labels-and-env.results.EXTENSION_LABELS)
-          operator: in
-          values: ["empty"]
-      image: $(params.CNB_BUILDER_IMAGE)
-      imagePullPolicy: Always
-      command: ["/cnb/lifecycle/builder"]
-      env:
-        - name: CNB_PLATFORM_API
-          value: $(steps.get-labels-and-env.results.CNB_PLATFORM_API)
-      args:
-        - "-log-level=$(params.CNB_LOG_LEVEL)"
-        - "-app=$(workspaces.source.path)/$(params.SOURCE_SUBPATH)"
-        - "-layers=$(params.CNB_LAYERS_DIR)"
-        - "-group=/layers/group.toml"
-        - "-plan=/layers/plan.toml"
-        - "-platform=$(params.CNB_PLATFORM_DIR)"
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
-        - name: platform-dir
-          mountPath: $(params.CNB_PLATFORM_DIR)
-        - name: tekton-home-dir
-          mountPath: /tekton/home
- 
-    - name: export
-      image: $(params.CNB_BUILDER_IMAGE)
-      imagePullPolicy: Always
-      command: ["/cnb/lifecycle/exporter"]
-      env:
-        - name: CNB_PLATFORM_API
-          value: $(steps.get-labels-and-env.results.CNB_PLATFORM_API)
-      args:
-        - "-log-level=$(params.CNB_LOG_LEVEL)"
-        - "-app=$(workspaces.source.path)/$(params.SOURCE_SUBPATH)"
-        - "-layers=$(params.CNB_LAYERS_DIR)"
-        - "-group=/layers/group.toml"
-        - "-cache-dir=$(workspaces.cache.path)"
-        - "-cache-image=$(params.CNB_CACHE_IMAGE)"
-        - "-report=/layers/report.toml"
-        - "-process-type=$(params.CNB_PROCESS_TYPE)"
-        - "-uid=$(steps.get-labels-and-env.results.UID)"
-        - "-gid=$(steps.get-labels-and-env.results.GID)"
-        - "-insecure-registry=$(params.CNB_INSECURE_REGISTRIES)"
-        - "$(params.APP_IMAGE)"
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
- 
-    - name: results
-      image: registry.access.redhat.com/ubi8/python-311@sha256:43605cb2491ef2297a7acf4b4bf0b7f54f0c91b96daf12ae41c49cc7f192b153
-      script: |
-        #!/usr/bin/env python3
- 
-        import tomllib
- 
-        def write_to_file(filename, content):
-          with open(filename, "w") as f:
-            f.write(content)
- 
-        with open("/layers/report.toml", "rb") as f:
-            data = tomllib.load(f)
- 
-        img_data = data.get("image")
- 
-        tags = img_data.get("tags")
-        digest = img_data.get("digest")
-        image_id = img_data.get("image_id")
-        manifest_size = img_data.get("manifest_size")
- 
-        print("#### Image data ####")
-        print(f"tags: {tags}")
-        print(f"Digest: {digest}")
- 
-        if None not in (image_id, manifest_size):
-          print(f"image container id (when using daemon): {image_id}, manifest size: {manifest_size}")
- 
-        if not digest or not str(digest).startswith('sha256:'):
-          raise SystemExit(f'Invalid image digest: {digest}')
-
-        write_to_file('$(results.APP_IMAGE_DIGEST.path)', digest)
-        write_to_file('$(workspaces.source.path)/image-digest', digest)
- 
-      volumeMounts:
-        - name: layers-dir
-          mountPath: /layers
- 
-  volumes:
-    - name: tekton-home-dir
-      emptyDir: {}
-    - name: layers-dir
-      emptyDir: {}
-    - name: platform-dir
-      emptyDir: {}
-```
-
-apply:
-
-```bash
-kubectl apply -f buildpacks-phases.yaml -n cicd
-```
-
-Verify:
-
-```bash
-kubectl get task buildpacks-phases -n cicd
-```
-
-## Install BuildKit Task
-
-`buildkit-build` is a Tekton Task that runs when detect-build-type detects a Dockerfile, using BuildKit to build the application container image. It takes the source code from the shared workspace, builds the image from the Dockerfile, and pushes it to Harbor with the configured credentials.
 
 ### buildkit-build
 
-create `buildkit-build-task-update.yaml`
+`buildkit-build` is a Tekton Task that runs when detect-build-type detects a Dockerfile, using BuildKit to build the application container image. It takes the source code from the shared workspace, builds the image from the Dockerfile, and pushes it to Harbor with the configured credentials.
 
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
+File `buildkit-build-task-update.yaml`:
 
-metadata:
-  name: buildkit-build
-  namespace: cicd
-
-spec:
-  params:
-    - name: IMAGE
-      type: string
-
-    - name: DOCKERFILE
-      type: string
-      default: Dockerfile
-
-    - name: CONTEXT
-      type: string
-      default: .
-
-  results:
-    - name: IMAGE_DIGEST
-      description: Digest of the pushed image
-      type: string
-
-  workspaces:
-    - name: source
-    - name: dockerconfig
-
-  steps:
-    - name: build
-      image: moby/buildkit:latest
-
-      env:
-        - name: DOCKER_CONFIG
-          value: /tekton/home/.docker
-
-      securityContext:
-        privileged: true
-
-      volumeMounts:
-        - name: harbor-ca
-          mountPath: /etc/buildkit/certs
-          readOnly: true
-
-      script: |
-        #!/bin/sh
-        set -eu
-
-        echo "======================================"
-        echo "Starting BuildKit build"
-        echo "======================================"
-
-        echo "IMAGE: $(params.IMAGE)"
-        echo "DOCKERFILE: $(params.DOCKERFILE)"
-        echo "CONTEXT: $(params.CONTEXT)"
-
-        echo "Checking Dockerfile..."
-        test -f "$(workspaces.source.path)/$(params.DOCKERFILE)"
-        echo "Dockerfile found."
-
-        mkdir -p "${DOCKER_CONFIG}"
-
-        if [ -f "$(workspaces.dockerconfig.path)/.dockerconfigjson" ]; then
-          cp "$(workspaces.dockerconfig.path)/.dockerconfigjson" "${DOCKER_CONFIG}/config.json"
-        elif [ -f "$(workspaces.dockerconfig.path)/config.json" ]; then
-          cp "$(workspaces.dockerconfig.path)/config.json" "${DOCKER_CONFIG}/config.json"
-        else
-          echo "ERROR: Harbor registry credentials were not mounted."
-          exit 1
-        fi
-
-        echo "Creating BuildKit configuration..."
-
-        cat > /tmp/buildkitd.toml <<EOF
-        [registry."lab25-harbor.lab25.sunfire.lab"]
-          ca = ["/etc/buildkit/certs/ca.crt"]
-        EOF
-
-        cat /tmp/buildkitd.toml
-
-        cd "$(workspaces.source.path)"
-
-        echo "Starting BuildKit..."
-
-        BUILDKITD_FLAGS="--config /tmp/buildkitd.toml" \
-        buildctl-daemonless.sh build \
-          --frontend dockerfile.v0 \
-          --local context="$(workspaces.source.path)/$(params.CONTEXT)" \
-          --local dockerfile="$(workspaces.source.path)" \
-          --opt filename="$(params.DOCKERFILE)" \
-          --output type=image,name="$(params.IMAGE)",push=true,name-canonical=true \
-          --metadata-file=/tmp/build-metadata.json
-
-        echo "BuildKit build completed."
-
-        cat /tmp/build-metadata.json
-
-        IMAGE_DIGEST=$(grep '"containerimage.digest"' /tmp/build-metadata.json \
-          | sed 's/.*"containerimage.digest"[[:space:]]*:[[:space:]]*"\([^" ]*\)".*/\1/')
-
-        if [ -z "${IMAGE_DIGEST}" ]; then
-          echo "ERROR: BuildKit did not return an image digest."
-          exit 1
-        fi
-
-        case "${IMAGE_DIGEST}" in
-          sha256:*) ;;
-          *)
-            echo "ERROR: Invalid image digest: ${IMAGE_DIGEST}"
-            exit 1
-            ;;
-        esac
-
-        printf '%s' "${IMAGE_DIGEST}" > "$(results.IMAGE_DIGEST.path)"
-        printf '%s' "${IMAGE_DIGEST}" > "$(workspaces.source.path)/image-digest"
-
-        echo "Image digest: ${IMAGE_DIGEST}"
-
-```
-apply
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/buildkit-build-task-update.yaml
 
 ```bash
 kubectl apply -f buildkit-build-task-update.yaml
 ```
 
-Verify
-
-```bash
-kubectl get task buildkit-build -n cicd
-```
-
-## cosign task
+### sign-image (SBOM + Cosign)
 
 This `sign-image` Task is the security/signing stage after BuildKit or Buildpacks. Its job is to generate an SBOM, sign the image with Cosign, attach the SBOM as an attestation, and return the image digest.
 
-### sign-image and generate SBOM
-
 > `COSIGN_TLOG_UPLOAD` defaults to `false` for the air-gapped/private-registry lab flow. Enable it only when the cluster can reach the approved Sigstore transparency-log service.
 
-create `sign-image-task-update.yaml`
+File `sign-image-task-update.yaml`:
 
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
-
-metadata:
-  name: sign-image
-  namespace: cicd
-
-spec:
-  params:
-    - name: IMAGE
-      type: string
-
-    - name: COSIGN_TLOG_UPLOAD
-      type: string
-      default: "false"
-      description: "Upload the signature to the Sigstore transparency log. Set true only when the environment can reach the approved transparency-log service."
-
-  results:
-    - name: IMAGE_DIGEST
-      description: Digest of the image that was signed
-      type: string
-
-  workspaces:
-    - name: dockerconfig
-    - name: cosign
-    - name: source
-
-  steps:
-    # Step 1 - Prepare Docker registry credentials and read the immutable digest.
-    - name: image-digest
-      image: alpine:3.20
-      script: |
-        #!/bin/sh
-        set -eu
-
-        mkdir -p /tekton/home/.docker
-
-        if [ -f "$(workspaces.dockerconfig.path)/.dockerconfigjson" ]; then
-          cp "$(workspaces.dockerconfig.path)/.dockerconfigjson" /tekton/home/.docker/config.json
-        elif [ -f "$(workspaces.dockerconfig.path)/config.json" ]; then
-          cp "$(workspaces.dockerconfig.path)/config.json" /tekton/home/.docker/config.json
-        else
-          echo "ERROR: Harbor registry credentials were not mounted."
-          exit 1
-        fi
-
-        DIGEST_FILE="$(workspaces.source.path)/image-digest"
-
-        if [ ! -f "${DIGEST_FILE}" ]; then
-          echo "ERROR: Image digest file not found: ${DIGEST_FILE}"
-          exit 1
-        fi
-
-        IMAGE_DIGEST="$(cat "${DIGEST_FILE}" | tr -d '[:space:]')"
-
-        case "${IMAGE_DIGEST}" in
-          sha256:*) ;;
-          *)
-            echo "ERROR: Invalid image digest: ${IMAGE_DIGEST}"
-            exit 1
-            ;;
-        esac
-
-        printf '%s' "${IMAGE_DIGEST}" > "$(results.IMAGE_DIGEST.path)"
-        printf '%s' "${IMAGE_DIGEST}" > "${DIGEST_FILE}"
-
-        echo "Immutable image reference:"
-        echo "$(params.IMAGE)@${IMAGE_DIGEST}"
-
-    # Step 2 - Generate SBOM for the immutable image.
-    - name: sbom
-      image: anchore/syft:latest
-      env:
-        - name: DOCKER_CONFIG
-          value: /tekton/home/.docker
-        - name: SYFT_REGISTRY_INSECURE_SKIP_TLS_VERIFY
-          value: "false"
-      script: |
-        #!/bin/sh
-        set -eu
-        IMAGE_DIGEST="$(cat "$(workspaces.source.path)/image-digest" | tr -d '[:space:]')"
-        IMAGE_REF="$(params.IMAGE)@${IMAGE_DIGEST}"
-        /syft scan "${IMAGE_REF}" -o spdx-json="$(workspaces.source.path)/sbom.spdx.json"
-
-    # Step 3 - Cosign sign the immutable image digest.
-    - name: sign
-      image: ghcr.io/sigstore/cosign/cosign:v3.0.2
-      env:
-        - name: DOCKER_CONFIG
-          value: /tekton/home/.docker
-        - name: COSIGN_INSECURE_IGNORE_SCT
-          value: "true"
-        - name: COSIGN_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: cosign-password
-              key: password
-      script: |
-        #!/bin/sh
-        set -eu
-        IMAGE_DIGEST="$(cat "$(workspaces.source.path)/image-digest" | tr -d '[:space:]')"
-        IMAGE_REF="$(params.IMAGE)@${IMAGE_DIGEST}"
-        /ko-app/cosign sign --yes \
-          --tlog-upload="$(params.COSIGN_TLOG_UPLOAD)" \
-          --key "$(workspaces.cosign.path)/cosign.key" \
-          "${IMAGE_REF}"
-
-    # Step 4 - Attach the SPDX SBOM as a Cosign attestation.
-    - name: attest-sbom
-      image: ghcr.io/sigstore/cosign/cosign:v3.0.2
-      env:
-        - name: DOCKER_CONFIG
-          value: /tekton/home/.docker
-        - name: COSIGN_INSECURE_IGNORE_SCT
-          value: "true"
-        - name: COSIGN_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: cosign-password
-              key: password
-      script: |
-        #!/bin/sh
-        set -eu
-        IMAGE_DIGEST="$(cat "$(workspaces.source.path)/image-digest" | tr -d '[:space:]')"
-        IMAGE_REF="$(params.IMAGE)@${IMAGE_DIGEST}"
-        /ko-app/cosign attest --yes \
-          --tlog-upload="$(params.COSIGN_TLOG_UPLOAD)" \
-          --key "$(workspaces.cosign.path)/cosign.key" \
-          --type spdxjson \
-          --predicate "$(workspaces.source.path)/sbom.spdx.json" \
-          "${IMAGE_REF}"
-```
-Verify:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/sign-image-task-update.yaml
 
 ```bash
-kubectl get task sign-image -n cicd
+kubectl apply -f sign-image-task-update.yaml
 ```
-
-## update-values task
-
-`update-values` is the GitOps update stage of the Tekton pipeline. It updates the Helm chart's values.yaml with the newly built image and its digest, commits the change, and pushes it back to repository.
 
 ### update-values
 
-create `update-values.yaml`
+`update-values` is the GitOps update stage of the Tekton pipeline. It updates the Helm chart's values.yaml with the newly built image and its digest, commits the change, and pushes it back to the repository.
 
-```yaml
-apiVersion: tekton.dev/v1
-kind: Task
+File `update-values.yaml`:
 
-metadata:
-  name: update-values
-  namespace: cicd
-
-spec:
-
-  description: >
-    Clone the Git repository, update Helm values.yaml
-    with the newly built Harbor image, commit the change,
-    and push it back to the same Git repository.
-
-  params:
-
-    - name: REPO_URL
-      type: string
-      description: Git repository URL
-      default: http://10.12.90.62/admin/travelPortal-test-buildpack.git
-
-    - name: IMAGE
-      type: string
-      description: Full container image including tag
-      default: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-
-    - name: IMAGE_DIGEST
-      type: string
-      description: SHA256 digest of the pushed image
-
-    - name: VALUES_FILE
-      type: string
-      description: Helm values file relative to repository root
-      default: helm-charts/values.yaml
-
-    - name: GIT_BRANCH
-      type: string
-      description: Git branch
-      default: main
-
-    - name: COMMIT_MESSAGE
-      type: string
-      description: Git commit message
-      default: "ci: update TravelPortal image digest"
-
-  workspaces:
-
-    - name: source
-      description: Workspace used by this task
-
-  steps:
-
-    - name: update-and-push
-
-      image: alpine/git:latest
-
-      env:
-
-        - name: GIT_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: repo-git-credentials
-              key: username
-
-        - name: GIT_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: repo-git-credentials
-              key: token
-
-      script: |
-        #!/bin/sh
-
-        set -eu
-
-        WORKDIR="$(workspaces.source.path)"
-
-        git config --global credential.helper '!f() { printf "username=%s\npassword=%s\n" "$GIT_USERNAME" "$GIT_TOKEN"; }; f'
-
-        echo "========================================"
-        echo "Update Helm values.yaml"
-        echo "========================================"
-
-        echo ""
-        echo "Workspace:"
-        echo "${WORKDIR}"
-
-        echo ""
-        echo "Repository:"
-        echo "$(params.REPO_URL)"
-
-        echo ""
-        echo "Branch:"
-        echo "$(params.GIT_BRANCH)"
-
-        echo ""
-        echo "Image:"
-        echo "$(params.IMAGE)"
-
-        echo ""
-        echo "Image digest:"
-        echo "$(params.IMAGE_DIGEST)"
-
-        echo ""
-        echo "Values file:"
-        echo "$(params.VALUES_FILE)"
-
-        # ----------------------------------------
-        # Clean workspace
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Cleaning workspace"
-        echo "========================================"
-
-        rm -rf "${WORKDIR:?}"/*
-        rm -rf "${WORKDIR}"/.[!.]*
-        rm -rf "${WORKDIR}"/..?*
-
-        # ----------------------------------------
-        # Clone repository
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Cloning Git repository"
-        echo "========================================"
-
-        git clone \
-          --branch "$(params.GIT_BRANCH)" \
-          --depth 1 \
-          "$(params.REPO_URL)" \
-          "${WORKDIR}"
-
-        echo ""
-        echo "Repository cloned successfully."
-
-        # ----------------------------------------
-        # Configure Git safe directory
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Configuring Git safe.directory"
-        echo "========================================"
-
-        git config --global --add safe.directory "${WORKDIR}"
-
-        # ----------------------------------------
-        # Enter repository
-        # ----------------------------------------
-
-        cd "${WORKDIR}"
-
-        echo ""
-        echo "========================================"
-        echo "Git repository"
-        echo "========================================"
-
-        git status
-
-        echo ""
-        echo "Current branch:"
-        git branch --show-current
-
-        echo ""
-        echo "Repository contents:"
-        ls -la
-
-        # ----------------------------------------
-        # Check values.yaml
-        # ----------------------------------------
-
-        VALUES_FILE="${WORKDIR}/$(params.VALUES_FILE)"
-
-        echo ""
-        echo "========================================"
-        echo "Checking values.yaml"
-        echo "========================================"
-
-        if [ ! -f "${VALUES_FILE}" ]; then
-
-          echo "ERROR: values.yaml not found:"
-          echo "${VALUES_FILE}"
-
-          echo ""
-          echo "Searching for values.yaml..."
-
-          find "${WORKDIR}" \
-            -type f \
-            -name "values.yaml" \
-            -print
-
-          exit 1
-
-        fi
-
-        echo ""
-        echo "Current values.yaml:"
-        echo "----------------------------------------"
-
-        cat "${VALUES_FILE}"
-
-        echo "----------------------------------------"
-
-        # ----------------------------------------
-        # Extract image repository,  tag and digest
-        # ----------------------------------------
-
-        IMAGE="$(params.IMAGE)"
-        IMAGE_REPOSITORY="${IMAGE%:*}"
-        IMAGE_TAG="${IMAGE##*:}"
-        IMAGE_DIGEST="$(params.IMAGE_DIGEST)"
-
-        echo ""
-        echo "========================================"
-        echo "Image information"
-        echo "========================================"
-
-        echo "Full image:"
-        echo "${IMAGE}"
-
-        echo ""
-        echo "Image repository:"
-        echo "${IMAGE_REPOSITORY}"
-
-        echo ""
-        echo "Image tag:"
-        echo "${IMAGE_TAG}"
-
-        echo ""
-        echo "Image digest:"
-        echo "${IMAGE_DIGEST}"
-
-
-        # ----------------------------------------
-        # Validate digest
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Validating image digest"
-        echo "========================================"
-
-        case "${IMAGE_DIGEST}" in
-          sha256:*)
-            echo "Valid SHA256 digest."
-            ;;
-          *)
-            echo "ERROR: IMAGE_DIGEST does not start with sha256:"
-            echo "${IMAGE_DIGEST}"
-            exit 1
-            ;;
-        esac
-
-        # ----------------------------------------
-        # Update image repository, tag and digest
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Updating values.yaml"
-        echo "========================================"
-
-        sed -i \
-          "/^image:/,/^env:/ s|^  repository:.*|  repository: ${IMAGE_REPOSITORY}|" \
-          "${VALUES_FILE}"
-
-        sed -i \
-          "/^image:/,/^env:/ s|^  tag:.*|  tag: \"${IMAGE_TAG}\"|" \
-          "${VALUES_FILE}"
-
-        sed -i \
-          "/^image:/,/^env:/ s|^  digest:.*|  digest: \"${IMAGE_DIGEST}\"|" \
-          "${VALUES_FILE}"
-
-
-        echo ""
-        echo "Updated values.yaml:"
-        echo "----------------------------------------"
-
-        cat "${VALUES_FILE}"
-
-        echo "----------------------------------------"
-
-        # ----------------------------------------
-        # Configure Git
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Configuring Git"
-        echo "========================================"
-
-        git config user.name "Tekton CI"
-        git config user.email "tekton-ci@local"
-
-        git config --global --add safe.directory "${WORKDIR}"
-
-        # ----------------------------------------
-        # Configure repository authentication
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Configuring repository authentication"
-        echo "========================================"
-
-        # Keep the repository URL supplied by the Pipeline/Trigger.
-        # The credential helper injects the username/token only for Git operations.
-        git remote set-url origin "$(params.REPO_URL)"
-
-        echo "Repository remote configured."
-
-        # ----------------------------------------
-        # Git diff
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Git diff"
-        echo "========================================"
-
-        git diff -- "$(params.VALUES_FILE)"
-
-        # ----------------------------------------
-        # Check if anything changed
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Checking for changes"
-        echo "========================================"
-
-        if git diff --quiet -- "$(params.VALUES_FILE)"; then
-
-          echo "No changes detected in values.yaml."
-
-          exit 0
-
-        fi
-
-        echo "Changes detected."
-
-        # ----------------------------------------
-        # Git add
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Git add"
-        echo "========================================"
-
-        git add "$(params.VALUES_FILE)"
-
-        git status
-
-        # ----------------------------------------
-        # Git commit
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Git commit"
-        echo "========================================"
-
-        git commit \
-          -m "$(params.COMMIT_MESSAGE): ${IMAGE}"
-
-        # ----------------------------------------
-        # Git push
-        # ----------------------------------------
-
-        echo ""
-        echo "========================================"
-        echo "Git push"
-        echo "========================================"
-
-        git push origin "$(params.GIT_BRANCH)"
-
-        echo ""
-        echo "========================================"
-        echo "SUCCESS"
-        echo "========================================"
-
-        echo "Helm values.yaml updated."
-        echo "Git commit created."
-        echo "Changes pushed to the repository."
-```
-
-apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/update-values.yaml
 
 ```bash
 kubectl apply -f update-values.yaml
 ```
 
-Verify:
+### Validation – Tasks
 
 ```bash
-kubectl get task update-values -n cicd
+kubectl get tasks -n cicd
 ```
 
-## pipeline creation
+Expected result (all six Tasks listed):
+
+```text
+git-clone-update
+detect-build-type
+buildpacks-phases
+buildkit-build
+sign-image
+update-values
+```
+
+## Pipeline
 
 Tasks are added to the Pipeline using `taskRef`, which references previously created Tekton Tasks. params pass required values to each Task, workspaces share files/credentials, and runAfter/when control the execution order and conditions. The Pipeline first clones the repository, then detects whether a Dockerfile exists and runs BuildKit or Buildpacks accordingly. After the image is built, the sign Task generates the SBOM and signs/attests the image. Finally, the update-values Task receives the image digest from the sign Task, updates values.yaml, commits the change, and pushes it back to the same Git repository—completing the GitOps update.
 
-### Pipeline
+File `travelportal-pipeline-values-update.yaml`:
 
-create `travelportal-pipeline-values-update.yaml`
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: Pipeline
-metadata:
-  name: travelportal-pipeline-values-update
-  namespace: cicd
-spec:
-  params:
-    - name: REPO_URL
-      type: string
-      default: http://10.12.90.62/admin/travelPortal-test-buildpack.git 
-    - name: REVISION
-      type: string
-      default: main
-    - name: IMAGE
-      type: string
-      default: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-    - name: BUILDER_IMAGE
-      type: string
-      default: paketobuildpacks/builder-jammy-base
-
-  workspaces:
-    - name: source
-    - name: dockerconfig
-    - name: cosign-key
-    - name: cache
-    - name: git-credentials
-
-  tasks:
-
-    # ----------------------------------------
-    # 1. Clone Git repository
-    # ----------------------------------------
-    - name: clone
-      taskRef:
-        name: git-clone-update
-      params:
-        - name: url
-          value: "$(params.REPO_URL)"
-        - name: revision
-          value: "$(params.REVISION)"
-        - name: deleteExisting
-          value: "true"
-      workspaces:
-        - name: output
-          workspace: source
-        - name: git-credentials
-          workspace: git-credentials
-
-    # ----------------------------------------
-    # 2. Detect BuildKit vs Buildpacks
-    # ----------------------------------------
-    - name: detect
-      runAfter:
-        - clone
-      taskRef:
-        name: detect-build-type
-      workspaces:
-        - name: source
-          workspace: source
-
-    # ----------------------------------------
-    # 3. Build using BuildKit
-    # ----------------------------------------
-    - name: buildkit
-      runAfter:
-        - detect
-      when:
-        - input: "$(tasks.detect.results.BUILD_TYPE)"
-          operator: in
-          values:
-            - buildkit
-      taskRef:
-        name: buildkit-build
-      params:
-        - name: IMAGE
-          value: "$(params.IMAGE)"
-        - name: DOCKERFILE
-          value: Dockerfile
-        - name: CONTEXT
-          value: "."
-      workspaces:
-        - name: source
-          workspace: source
-        - name: dockerconfig
-          workspace: dockerconfig
-
-    # ----------------------------------------
-    # 4. Build using Buildpacks
-    # ----------------------------------------
-    - name: buildpack
-      runAfter:
-        - detect
-      when:
-        - input: "$(tasks.detect.results.BUILD_TYPE)"
-          operator: in
-          values:
-            - buildpack
-      taskRef:
-        name: buildpacks-phases
-      params:
-        - name: CNB_BUILDER_IMAGE
-          value: "$(params.BUILDER_IMAGE)"
-        - name: APP_IMAGE
-          value: "$(params.IMAGE)"
-        - name: SOURCE_SUBPATH
-          value: ""
-      workspaces:
-        - name: source
-          workspace: source
-        - name: dockerconfig
-          workspace: dockerconfig
-        - name: cache
-          workspace: cache
-
-    # ----------------------------------------
-    # 5. Generate SBOM + Sign
-    # ----------------------------------------
-    - name: sign
-      runAfter:
-        - buildkit
-        - buildpack
-      taskRef:
-        name: sign-image
-      params:
-        - name: IMAGE
-          value: "$(params.IMAGE)"
-        - name: COSIGN_TLOG_UPLOAD
-          value: "false"
-      workspaces:
-        - name: dockerconfig
-          workspace: dockerconfig
-        - name: cosign
-          workspace: cosign-key
-        - name: source
-          workspace: source
-
-    # ----------------------------------------
-    # 6. Update values.yaml and push to Git
-    # ----------------------------------------
-    - name: update-values
-      runAfter:
-        - sign
-      taskRef:
-        name: update-values
-      params:
-        - name: REPO_URL
-          value: "$(params.REPO_URL)"
-
-        - name: IMAGE
-          value: "$(params.IMAGE)"
-
-        - name: IMAGE_DIGEST
-          value: $(tasks.sign.results.IMAGE_DIGEST)
-
-        - name: VALUES_FILE
-          value: "helm-charts/values.yaml"         
-
-        - name: GIT_BRANCH
-          value: "$(params.REVISION)"
-
-        - name: COMMIT_MESSAGE
-          value: "ci: update TravelPortal image digest"
-
-      workspaces:
-        - name: source
-          workspace: source
-
-```
-
-apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/travelportal-pipeline-values-update.yaml
 
 ```bash
 kubectl apply -f travelportal-pipeline-values-update.yaml
 ```
 
-Verify:
+The Pipeline is validated together with the PipelineRun at the end of the next sections.
 
-```bash
-kubectl get pipeline -n cicd
-```
+## Pipeline Dependencies (Storage, ConfigMap, Secrets, Service Account)
 
-## PipelineRun
-
-The PipelineRun is used to start and execute the travelportal-pipeline-values-update Pipeline. It provides the pipeline parameters, connects the required workspaces and secrets, and applies additional Pod configuration needed during the pipeline execution. The `pipelineRef` selects the travelportal-pipeline-values-update Pipeline, while params provide the Git repository, branch, Harbor image, and Buildpacks builder image that the Pipeline will use. The workspaces provide the required storage and credentials: the source and cache PVCs are created per PipelineRun, dockerconfig provides Harbor authentication, git-credentials provides repository push credentials, and cosign-key provides the image-signing key. The SBOM is stored in the source workspace, so no separate SBOM workspace is required. The taskRunSpecs customize the BuildKit TaskRun by adding the harbor-ca ConfigMap as a volume. This allows the BuildKit Pod to access the Harbor CA certificate. The BuildKit registry configuration references that CA and does not use `registry.insecure=true` for the Harbor HTTPS endpoint.
-
-## Pipeline Dependencies (PVC, ConfigMaps, Secrets, Service Account)
-
-Before triggering the PipelineRun, create the required storage, configuration, and credentials.
+Before triggering the PipelineRun, create the required storage, configuration, and credentials. A single validation at the end of this section checks everything.
 
 ### Source and Build Cache Storage
 
-The corrected PipelineRun creates dedicated `source` and `cache` PVCs for each run using the `lab-gold-storage-policy` StorageClass. This prevents concurrent PipelineRuns from overwriting the same shared source workspace.
-
-Verify that the StorageClass exists:
-
-```bash
-kubectl get storageclass lab-gold-storage-policy
-```
+The PipelineRun creates dedicated `source` and `cache` PVCs for each run using the `lab-gold-storage-policy` StorageClass. This prevents concurrent PipelineRuns from overwriting the same shared source workspace.
 
 If the StorageClass has a different name in your VKS environment, replace `lab-gold-storage-policy` in the PipelineRun and TriggerTemplate workspace definitions.
 
-### Create harbor-ca-cert.yaml
+### Harbor CA ConfigMap
 
-```yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: harbor-ca-cert
-  namespace: cicd
-data:
-  ca.crt: |
-    -----BEGIN CERTIFICATE-----
-    # Paste your Harbor / vCenter CA certificate content here
-    -----END CERTIFICATE-----
-```
-
-apply:
+Create a ConfigMap named `harbor-ca-cert` in the `cicd` namespace from your Harbor / vCenter CA certificate (the key must be `ca.crt`):
 
 ```bash
-kubectl apply -f harbor-ca-cert.yaml
+kubectl create configmap harbor-ca-cert \
+  -n cicd \
+  --from-file=ca.crt=<path-to-harbor-ca.crt>
 ```
 
-### Create pipeline-secrets.yaml
+### Secrets
 
-```yaml
-# 1. Git repository credentials
-apiVersion: v1
-kind: Secret
-metadata:
-  name: repo-git-credentials
-  namespace: cicd
-type: Opaque
-stringData:
-  username: "admin"
-  token: "YOUR_PERSONAL_ACCESS_TOKEN"
----
-# 2. Harbor Registry Secret (for Docker config workspace)
-apiVersion: v1
-kind: Secret
-metadata:
-  name: harbor-registry-secret
-  namespace: cicd
-type: kubernetes.io/dockerconfigjson
-stringData:
-  .dockerconfigjson: |
-    {
-      "auths": {
-        "lab25-harbor.lab25.sunfire.lab": {
-          "username": "admin",
-          "password": "YOUR_HARBOR_PASSWORD"
-        }
-      }
-    }
----
-# 3. Cosign Password
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cosign-password
-  namespace: cicd
-type: Opaque
-stringData:
-  password: "YOUR_COSIGN_PASSWORD"
----
-# 4. Cosign Keys
-apiVersion: v1
-kind: Secret
-metadata:
-  name: cosign-key
-  namespace: cicd
-type: Opaque
-stringData:
-  cosign.key: |
-    -----BEGIN ENCRYPTED COSIGN PRIVATE KEY-----
-    # Paste your generated cosign.key here
-    -----END ENCRYPTED COSIGN PRIVATE KEY-----
-  cosign.pub: |
-    -----BEGIN COSIGN PUBLIC KEY-----
-    # Paste your generated cosign.pub here
-    -----END COSIGN PUBLIC KEY-----
-```
+The pipeline needs four secrets in the `cicd` namespace. Create them one by one. Replace every placeholder value with your real credentials before applying.
 
-apply:
+#### 1. Git credentials Secret (`repo-git-credentials`)
+
+Git repository username and token, used by the clone and update-values Tasks.
+
+File `github-push-secret.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/github-push-secret.yaml
 
 ```bash
-kubectl apply -f pipeline-secrets.yaml
+kubectl apply -f github-push-secret.yaml
 ```
 
-### Create tekton-pipeline-sa.yaml
+If you need to create the repository credentials directly instead of from the manifest:
 
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: tekton-pipeline-sa
-  namespace: cicd
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: tekton-pipeline-role
-  namespace: cicd
-rules:
-  - apiGroups: [""]
-    resources: ["secrets", "configmaps"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: tekton-pipeline-rolebinding
-  namespace: cicd
-subjects:
-  - kind: ServiceAccount
-    name: tekton-pipeline-sa
-    namespace: cicd
-roleRef:
-  kind: Role
-  name: tekton-pipeline-role
-  apiGroup: rbac.authorization.k8s.io
+```bash
+kubectl create secret generic repo-git-credentials \
+  -n cicd \
+  --from-literal=username=admin \
+  --from-literal=token='<REPO_TOKEN>'
 ```
 
-apply:
+#### 2. Harbor registry Secret (`harbor-registry-secret`)
+
+Harbor Docker config (`dockerconfigjson`), used to push and sign images.
+
+File `harbor-credentials.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/harbor-credentials.yaml
+
+```bash
+kubectl apply -f harbor-credentials.yaml
+```
+
+#### 3. Cosign password Secret (`cosign-password`)
+
+Password of the Cosign private key.
+
+File `cosign-pass.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cosign-pass.yaml
+
+```bash
+kubectl apply -f cosign-pass.yaml
+```
+
+#### 4. Cosign key pair Secret (`cosign-key`)
+
+Cosign private and public key. Create it from the generated key pair:
+
+```bash
+kubectl create secret generic cosign-key \
+  -n cicd \
+  --from-file=cosign.key=cosign.key \
+  --from-file=cosign.pub=cosign.pub
+```
+
+### ServiceAccount
+
+The TriggerTemplate and PipelineRun use the dedicated `tekton-pipeline-sa` ServiceAccount.
+
+File `tekton-pipeline-sa.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/tekton-pipeline-sa.yaml
 
 ```bash
 kubectl apply -f tekton-pipeline-sa.yaml
 ```
 
-The TriggerTemplate and PipelineRun use the dedicated `tekton-pipeline-sa` ServiceAccount.
-
-### PipelineRun
-
-create `travelportal-pipelinerun-pack-values-update.yaml`
-
-```yaml
-apiVersion: tekton.dev/v1
-kind: PipelineRun
-metadata:
-  generateName: travelportal-build-
-  namespace: cicd
-spec:
-  pipelineRef:
-    name: travelportal-pipeline-values-update
-  params:
-    - name: REPO_URL
-      value: http://10.12.90.62/admin/travelPortal-test-buildpack.git
-    - name: REVISION
-      value: main
-    - name: IMAGE
-      value: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-    - name: BUILDER_IMAGE
-      value: paketobuildpacks/builder-jammy-base
-  taskRunTemplate:
-    serviceAccountName: tekton-pipeline-sa
-  workspaces:
-    - name: source
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          storageClassName: lab-gold-storage-policy
-          resources:
-            requests:
-              storage: 5Gi
-    - name: dockerconfig
-      secret:
-        secretName: harbor-registry-secret
-    - name: cosign-key
-      secret:
-        secretName: cosign-key
-    - name: cache
-      volumeClaimTemplate:
-        spec:
-          accessModes:
-            - ReadWriteOnce
-          storageClassName: lab-gold-storage-policy
-          resources:
-            requests:
-              storage: 5Gi
-    - name: git-credentials
-      secret:
-        secretName: repo-git-credentials
-
-  taskRunSpecs:
-    - pipelineTaskName: buildkit
-      podTemplate:
-        volumes:
-          - name: harbor-ca
-            configMap:
-              name: harbor-ca-cert
-```
-
-apply:
+### Validation – Dependencies
 
 ```bash
-kubectl apply -f  travelportal-pipelinerun-pack-values-update.yaml
+kubectl get storageclass lab-gold-storage-policy
+kubectl get configmap harbor-ca-cert -n cicd
+kubectl get secret repo-git-credentials harbor-registry-secret cosign-password cosign-key -n cicd
+kubectl get sa tekton-pipeline-sa -n cicd
 ```
 
-verify:
+Expected result: every object is found, with no `NotFound` errors.
+
+## PipelineRun
+
+The PipelineRun is used to start and execute the travelportal-pipeline-values-update Pipeline. It provides the pipeline parameters, connects the required workspaces and secrets, and applies additional Pod configuration needed during the pipeline execution. The `pipelineRef` selects the travelportal-pipeline-values-update Pipeline, while params provide the Git repository, branch, Harbor image, and Buildpacks builder image that the Pipeline will use. The workspaces provide the required storage and credentials: the source and cache PVCs are created per PipelineRun, dockerconfig provides Harbor authentication, git-credentials provides repository push credentials, and cosign-key provides the image-signing key. The SBOM is stored in the source workspace, so no separate SBOM workspace is required. The taskRunSpecs customize the BuildKit TaskRun by adding the harbor-ca ConfigMap as a volume. This allows the BuildKit Pod to access the Harbor CA certificate. The BuildKit registry configuration references that CA and does not use `registry.insecure=true` for the Harbor HTTPS endpoint.
+
+File `travelportal-pipelinerun-pack-values-update.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/travelportal-pipelinerun-pack-values-update.yaml
 
 ```bash
-kubectl get pipelinerun -n cicd
+kubectl apply -f travelportal-pipelinerun-pack-values-update.yaml
 ```
 
-## Verify image in Harbor
+### Validation – Pipeline, PipelineRun, and output
 
-From a machine that can reach Harbor:
+Pipeline and run status:
+
+```bash
+kubectl get pipeline -n cicd
+kubectl get pipelinerun -n cicd -w
+kubectl get pvc -n cicd
+```
+
+Expected result: the Pipeline exists, the PipelineRun finishes with `SUCCEEDED=True`, and the `source` and `cache` PVCs are `Bound`. You can also follow the run in the Tekton Dashboard.
+
+Image in Harbor (from a machine that can reach Harbor):
 
 ```bash
 docker login lab25-harbor.lab25.sunfire.lab
+docker pull lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
 ```
 
-then
-
-```bash
-docker pull \
-  lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-```
-
-You can also inspect it using:
-
-```bash
-docker images
-```
-
-## Verify Cosign signature
-
-Use:
+Cosign signature and SBOM attestation:
 
 ```bash
 IMAGE=lab25-harbor.lab25.sunfire.lab/cicd/travelportal
@@ -2790,13 +651,7 @@ cosign verify \
   --offline \
   --key cosign.pub \
   "${IMAGE}@${IMAGE_DIGEST}"
-```
 
-## Verify SBOM attestation
-
-Use:
-
-```bash
 cosign verify-attestation \
   --offline \
   --key cosign.pub \
@@ -2804,7 +659,7 @@ cosign verify-attestation \
   "${IMAGE}@${IMAGE_DIGEST}"
 ```
 
-This validates that the SBOM attestation is associated with the image.
+Expected result: the image pulls, the signature verifies, and the SBOM attestation is associated with the image digest.
 
 # Automatic pipeline trigger with Tekton Triggers
 
@@ -2824,47 +679,6 @@ Until now the PipelineRun was started by hand with kubectl apply. In this sectio
 | Repository server | `http://10.12.90.62` |
 | Repository | `http://10.12.90.62/admin/travelPortal-test-buildpack.git` |
 | Branch | `main` |
-
-## The complete flow
-
-```text
-Developer
-   |
-   | git push origin main
-   v
-Repository (10.12.90.62)
-   |
-   | POST webhook
-   v
-NodePort 10.12.92.3:31877
-   |
-   v
-Tekton EventListener
-travelportal-repository-listener
-   |
-   +--> CEL interceptor
-   |      +--> only main branch
-   |      +--> ignore commits made by the pipeline itself
-   |
-   +--> TriggerBinding
-   |
-   +--> TriggerTemplate
-   |
-   v
-PipelineRun
-   |
-   v
-travelportal-pipeline-values-update
-   |
-   +--> clone
-   +--> detect
-   +--> BuildKit OR Buildpacks
-   +--> sign
-   +--> update-values
-   |
-   v
-Commit of helm-charts/values.yaml to the repository
-```
 
 ## The Tekton Triggers objects created in this section
 
@@ -2892,227 +706,71 @@ kubectl apply --filename https://infra.tekton.dev/tekton-releases/triggers/lates
 
 For production, pin the Triggers version that is tested with your selected Tekton Pipelines release instead of using `latest`.
 
-Check the Triggers namespace components:
-
-```bash
-kubectl get pods -n tekton-pipelines | grep triggers
-kubectl get deployment -n tekton-pipelines | grep triggers
-```
-
-## Check that Tekton Triggers is installed
+### Validation – Tekton Triggers
 
 ```bash
 kubectl get crd | grep triggers.tekton.dev
-```
-
-You should see:
-
-```text
-clusterinterceptors.triggers.tekton.dev
-clustertriggerbindings.triggers.tekton.dev
-eventlisteners.triggers.tekton.dev
-interceptors.triggers.tekton.dev
-triggerbindings.triggers.tekton.dev
-triggers.triggers.tekton.dev
-triggertemplates.triggers.tekton.dev
-```
-
-## Check the Triggers pods
-
-```bash
 kubectl get pods -n tekton-pipelines | grep triggers
-kubectl get deployment -n tekton-pipelines | grep triggers
 ```
 
-You should see:
+Expected result:
 
 ```text
-tekton-triggers-controller-...
-tekton-triggers-core-interceptors-...
-tekton-triggers-webhook-...
+CRDs: clusterinterceptors, clustertriggerbindings, eventlisteners, interceptors,
+      triggerbindings, triggers, triggertemplates (all .triggers.tekton.dev)
+
+Pods (all 1/1 Running):
+      tekton-triggers-controller-...
+      tekton-triggers-core-interceptors-...
+      tekton-triggers-webhook-...
 ```
 
-## Create the EventListener ServiceAccount and RBAC
+## EventListener ServiceAccount and RBAC
 
-The EventListener runs with:
+The EventListener runs with `serviceAccountName: repository-trigger-sa`. It needs permission to read the Triggers resources in `cicd`, read the cluster-scoped Triggers resources (`clusterinterceptors`, `clustertriggerbindings`), and create PipelineRuns.
 
-```yaml
-serviceAccountName: repository-trigger-sa
-```
+### ServiceAccount
 
-It needs permission to read the Triggers resources in `cicd`, read the cluster-scoped Triggers resources (`clusterinterceptors`, `clustertriggerbindings`), and create PipelineRuns.
+File `webhook-sa.yaml`:
 
-### Create the ServiceAccount
-
-`webhook-sa.yaml`:
-
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: repository-trigger-sa
-  namespace: cicd
-```
-
-Apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/webhook-sa.yaml
 
 ```bash
 kubectl apply -f webhook-sa.yaml
 ```
 
-### Create Role (RBAC)
+### Role, RoleBinding, ClusterRole and ClusterRoleBinding
 
-`repository-trigger-rbac.yaml`:
+`eventlistener-rbac.yaml` contains the Role (`repository-trigger-role`), RoleBinding (`repository-trigger-rolebinding`), ClusterRole (`repository-trigger-cluster-role`) and ClusterRoleBinding (`repository-trigger-cluster-rolebinding`).
 
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: repository-trigger-role
-  namespace: cicd
-rules:
-  - apiGroups: ["triggers.tekton.dev"]
-    resources:
-      - eventlisteners
-      - triggerbindings
-      - triggertemplates
-      - triggers
-      - interceptors
-    verbs:
-      - get
-      - list
-      - watch
-
-  - apiGroups: ["tekton.dev"]
-    resources:
-      - pipelineruns
-    verbs:
-      - create
-      - get
-      - list
-      - watch
-```
-
-Apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/eventlistener-rbac.yaml
 
 ```bash
-kubectl apply -f repository-trigger-rbac.yaml
+kubectl apply -f eventlistener-rbac.yaml
 ```
 
-### Create RoleBinding (RBAC)
-
-`repository-trigger-rolebinding.yaml`:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: repository-trigger-rolebinding
-  namespace: cicd
-subjects:
-  - kind: ServiceAccount
-    name: repository-trigger-sa
-    namespace: cicd
-roleRef:
-  kind: Role
-  name: repository-trigger-role
-  apiGroup: rbac.authorization.k8s.io
-```
-
-Apply:
-
-```bash
-kubectl apply -f repository-trigger-rolebinding.yaml
-```
-
-### Create cluster Role (RBAC)
-
-`clusterrole.yaml`
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: repository-trigger-cluster-role
-rules:
-  - apiGroups: ["triggers.tekton.dev"]
-    resources:
-      - clusterinterceptors
-      - clustertriggerbindings
-    verbs:
-      - get
-      - list
-      - watch
-```
-
-Apply:
-
-```bash
-kubectl apply -f clusterrole.yaml
-```
-
-### Create ClusterRoleBinding
-
-`repository-trigger-cluster-rbac.yaml`:
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: repository-trigger-cluster-rolebinding
-subjects:
-  - kind: ServiceAccount
-    name: repository-trigger-sa
-    namespace: cicd
-roleRef:
-  kind: ClusterRole
-  name: repository-trigger-cluster-role
-  apiGroup: rbac.authorization.k8s.io
-```
-
-Apply:
-
-```bash
-kubectl apply -f repository-trigger-cluster-rbac.yaml
-```
-
-### Verify the objects
+### Validation – RBAC
 
 ```bash
 kubectl get sa repository-trigger-sa -n cicd
-kubectl get role repository-trigger-role -n cicd
-kubectl get rolebinding repository-trigger-rolebinding -n cicd
-kubectl get clusterrole repository-trigger-cluster-role
-kubectl get clusterrolebinding repository-trigger-cluster-rolebinding
-```
+kubectl get role,rolebinding -n cicd | grep repository-trigger
+kubectl get clusterrole,clusterrolebinding | grep repository-trigger
 
-### Verify the permissions
+for r in triggerbindings triggertemplates eventlisteners; do
+  kubectl auth can-i list $r.triggers.tekton.dev \
+    --as=system:serviceaccount:cicd:repository-trigger-sa -n cicd
+done
 
-```bash
-kubectl auth can-i list triggerbindings.triggers.tekton.dev \
-  --as=system:serviceaccount:cicd:repository-trigger-sa -n cicd
-
-kubectl auth can-i list triggertemplates.triggers.tekton.dev \
-  --as=system:serviceaccount:cicd:repository-trigger-sa -n cicd
-
-kubectl auth can-i list eventlisteners.triggers.tekton.dev \
-  --as=system:serviceaccount:cicd:repository-trigger-sa -n cicd
-
-kubectl auth can-i list clusterinterceptors.triggers.tekton.dev \
-  --as=system:serviceaccount:cicd:repository-trigger-sa
-
-kubectl auth can-i list clustertriggerbindings.triggers.tekton.dev \
-  --as=system:serviceaccount:cicd:repository-trigger-sa
+for r in clusterinterceptors clustertriggerbindings; do
+  kubectl auth can-i list $r.triggers.tekton.dev \
+    --as=system:serviceaccount:cicd:repository-trigger-sa
+done
 
 kubectl auth can-i create pipelineruns.tekton.dev \
   --as=system:serviceaccount:cicd:repository-trigger-sa -n cicd
 ```
 
-Expected for all of them:
-
-```text
-yes
-```
+Expected result: all objects exist and every `can-i` answers `yes`.
 
 By default the repository server blocks outbound webhook calls to hosts that are not on its allow list. Without the change below, the webhook fails with:
 
@@ -3121,41 +779,18 @@ webhook can only call allowed HTTP servers
 (check your security.ALLOWED_HOST_LIST setting)
 ```
 
-## Create the TriggerBinding
+## TriggerBinding, TriggerTemplate and EventListener
 
-`repository-trigger-binding.yaml`
+Create the three objects below, then validate them once at the end.
 
-```yaml
-apiVersion: triggers.tekton.dev/v1beta1
-kind: TriggerBinding
-metadata:
-  name: travelportal-repository-binding
-  namespace: cicd
-spec:
-  params:
-    - name: REPO_URL
-      value: http://10.12.90.62/admin/travelPortal-test-buildpack.git
+### TriggerBinding
 
-    - name: REVISION
-      value: main
+File `gitea-triggerbinding.yaml`:
 
-    - name: COMMIT_MESSAGE
-      value: $(body.head_commit.message)
-
-    - name: COMMIT_SHA
-      value: $(body.after)
-```
-
-Apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/gitea-triggerbinding.yaml
 
 ```bash
-kubectl apply -f repository-trigger-binding.yaml
-```
-
-Verify:
-
-```bash
-kubectl get triggerbinding travelportal-repository-binding -n cicd -o yaml
+kubectl apply -f gitea-triggerbinding.yaml
 ```
 
 The important values are:
@@ -3165,201 +800,53 @@ REPO_URL = http://10.12.90.62/admin/travelPortal-test-buildpack.git
 REVISION = main
 ```
 
-## Create the TriggerTemplate
+### TriggerTemplate
 
-`repository-trigger-template.yaml`
+File `gitea-triggertemplate.yaml`:
 
-```yaml
-apiVersion: triggers.tekton.dev/v1beta1
-kind: TriggerTemplate
-metadata:
-  name: travelportal-repository-template
-  namespace: cicd
-spec:
-  params:
-    - name: REPO_URL
-    - name: REVISION
-      default: main
-    - name: COMMIT_MESSAGE
-      default: Repository push - TravelPortal build
-    - name: COMMIT_SHA
-
-  resourcetemplates:
-    - apiVersion: tekton.dev/v1
-      kind: PipelineRun
-      metadata:
-        generateName: travelportal-build-
-      spec:
-        pipelineRef:
-          name: travelportal-pipeline-values-update
-        params:
-          - name: REPO_URL
-            value: $(tt.params.REPO_URL)
-          - name: REVISION
-            value: $(tt.params.REVISION)
-          - name: IMAGE
-            value: lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest
-          - name: BUILDER_IMAGE
-            value: paketobuildpacks/builder-jammy-base
-        taskRunTemplate:
-          serviceAccountName: tekton-pipeline-sa
-        taskRunSpecs:
-          - pipelineTaskName: buildkit
-            podTemplate:
-              volumes:
-                - name: harbor-ca
-                  configMap:
-                    name: harbor-ca-cert
-        timeouts:
-          pipeline: 1h0m0s
-        workspaces:
-          - name: source
-            volumeClaimTemplate:
-              spec:
-                accessModes:
-                  - ReadWriteOnce
-                storageClassName: lab-gold-storage-policy
-                resources:
-                  requests:
-                    storage: 5Gi
-          - name: dockerconfig
-            secret:
-              secretName: harbor-registry-secret
-          - name: cosign-key
-            secret:
-              secretName: cosign-key
-          - name: cache
-            volumeClaimTemplate:
-              spec:
-                accessModes:
-                  - ReadWriteOnce
-                storageClassName: lab-gold-storage-policy
-                resources:
-                  requests:
-                    storage: 5Gi
-          - name: git-credentials
-            secret:
-              secretName: repo-git-credentials
-```
-
-Apply:
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/gitea-triggertemplate.yaml
 
 ```bash
-kubectl apply -f repository-trigger-template.yaml
+kubectl apply -f gitea-triggertemplate.yaml
 ```
 
-Verify:
+The PipelineRun it creates must reference `travelportal-pipeline-values-update`, use the dedicated `tekton-pipeline-sa` service account, and pass the repository URL `http://10.12.90.62/admin/travelPortal-test-buildpack.git`.
+
+### EventListener
+
+File `gitea-eventlistener.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/gitea-eventlistener.yaml
 
 ```bash
-kubectl get triggertemplate travelportal-repository-template -n cicd -o yaml
+kubectl apply -f gitea-eventlistener.yaml
 ```
 
-The PipelineRun must reference `travelportal-pipeline-values-update`, use the dedicated `tekton-pipeline-sa` service account, and pass the repository URL `http://10.12.90.62/admin/travelPortal-test-buildpack.git`.
+The EventListener uses the cluster-scoped `cel` interceptor and exposes application port `8080` through a Kubernetes `NodePort`. In this lab the observed NodePort is `31877`, so the webhook URL is `http://10.12.92.3:31877`. Because the manifest specifies only `serviceType: NodePort`, Kubernetes may assign a different NodePort in another environment, so always confirm the actual value in the validation below.
 
-## Create the EventListener
+### Validation – TriggerBinding, TriggerTemplate and EventListener
 
-`repository-eventlistener.yaml`
-
-```yaml
-apiVersion: triggers.tekton.dev/v1beta1
-kind: EventListener
-metadata:
-  name: travelportal-repository-listener
-  namespace: cicd
-spec:
-  serviceAccountName: repository-trigger-sa
-
-  resources:
-    kubernetesResource:
-      serviceType: NodePort
-
-  triggers:
-    - name: travelportal-push
-
-      interceptors:
-        - ref:
-            apiVersion: triggers.tekton.dev
-            kind: ClusterInterceptor
-            name: cel
-          params:
-            - name: filter
-              value: >-
-                body.ref == 'refs/heads/main' &&
-                !body.head_commit.message.startsWith('ci: update TravelPortal image digest')
-
-      bindings:
-        - ref: travelportal-repository-binding
-
-      template:
-        ref: travelportal-repository-template
-```
-
-Apply:
+Check the objects, the CEL interceptor, and the generated Service:
 
 ```bash
-kubectl apply -f repository-eventlistener.yaml
-```
-
-Verify:
-
-```bash
+kubectl get triggerbinding travelportal-repository-binding -n cicd
+kubectl get triggertemplate travelportal-repository-template -n cicd
 kubectl get eventlistener travelportal-repository-listener -n cicd
+kubectl get clusterinterceptor cel
+kubectl get svc,endpoints el-travelportal-repository-listener -n cicd
+kubectl get pods -n cicd -l eventlistener=travelportal-repository-listener -o wide
 ```
 
-Expected:
+Expected result:
 
 ```text
-AVAILABLE=True
-READY=True
+EventListener   → AVAILABLE=True, READY=True
+CEL interceptor → present
+Service         → 8080:31877/TCP
+Endpoint        → <pod-ip>:8080
 ```
 
-## Verify the CEL ClusterInterceptor
-
-The EventListener uses the cluster-scoped cel interceptor. Verify that it is available:
-
-```bash
-kubectl get clusterinterceptors
-kubectl get clusterinterceptor cel -o yaml
-```
-
-## Check the generated Service
-
-```bash
-kubectl get svc el-travelportal-repository-listener -n cicd
-```
-
-The EventListener exposes application port `8080` through a Kubernetes `NodePort`.
-In this lab, the observed NodePort is `31877`, so the webhook URL is:
-
-```text
-http://10.12.92.3:31877
-```
-
-Because the EventListener manifest specifies only `serviceType: NodePort`, Kubernetes may assign a different NodePort in another environment. Always confirm the actual value with:
-
-```bash
-kubectl get svc el-travelportal-repository-listener -n cicd
-```
-
-### Check the Service endpoint and the EventListener pod
-
-```bash
-kubectl get endpoints el-travelportal-repository-listener -n cicd -o wide
-
-kubectl get pods -n cicd \
-  -l eventlistener=travelportal-repository-listener \
-  -o wide
-```
-
-## Test the EventListener before adding the webhook
-
-Test the NodePort:
-
-```bash
-curl -v http://10.12.92.3:31877
-```
-
-Send a webhook-style POST:
+Then send a webhook-style test POST to the NodePort (before adding the real webhook):
 
 ```bash
 cat >/tmp/test-event.json <<'EOF'
@@ -3370,22 +857,15 @@ cat >/tmp/test-event.json <<'EOF'
     "message": "test webhook"
   }
 }
-```
+EOF
 
-```bash
 curl -v \
   -H 'Content-Type: application/json' \
   --data-binary @/tmp/test-event.json \
   http://10.12.92.3:31877
 ```
 
-A working EventListener returns:
-
-```text
-HTTP/1.1 202 Accepted
-```
-
-with a Tekton event ID. This proves the path jumpbox → NodePort → EventListener works.
+A working EventListener returns `HTTP/1.1 202 Accepted` with a Tekton event ID. This proves the path jumpbox → NodePort → EventListener works, and a new `travelportal-build-xxxxx` PipelineRun appears.
 
 ## Add the webhook in the repository
 
@@ -3414,9 +894,7 @@ Use:
 | Event | `Push events` |
 | Branch | `main` |
 
-Save the webhook, then use Test Delivery or push a real commit.
-
-The values read from the push payload are:
+Save the webhook. The values read from the push payload are:
 
 ```text
 body.ref
@@ -3443,33 +921,11 @@ $(workspaces.source.path)/image-digest
 
 ### Repository credentials for update-values
 
-Create a Personal Access Token in the repository server and store it as a Secret.
+The clone and update-values Tasks read the repository credentials from the `username` and `token` keys of the `repo-git-credentials` Secret (created in the dependencies section). The token is a Personal Access Token created in the repository server.
 
-```bash
-kubectl create secret generic repo-git-credentials \
-  -n cicd \
-  --from-literal=username=admin \
-  --from-literal=token='<REPO_TOKEN>'
-```
+## Final validation – end to end
 
-The clone and update-values Tasks read these repository credentials. The update-values Task reads them with:
-
-```yaml
-env:
-  - name: GIT_USERNAME
-    valueFrom:
-      secretKeyRef:
-        name: repo-git-credentials
-        key: username
-
-  - name: GIT_TOKEN
-    valueFrom:
-      secretKeyRef:
-        name: repo-git-credentials
-        key: token
-```
-
-The developer does not create a PipelineRun manually:
+The developer does not create a PipelineRun manually. Make a change and push it:
 
 ```bash
 git add .
@@ -3477,47 +933,25 @@ git commit -m "developer change"
 git push origin main
 ```
 
-Watch the run:
+Then watch the automation:
 
 ```bash
 kubectl logs -f deployment/el-travelportal-repository-listener -n cicd
 kubectl get pipelineruns -n cicd -w
 ```
 
-You should see a new run named:
+Expected result:
 
 ```text
-travelportal-build-xxxxx
+Webhook delivery   → HTTP 202 Accepted
+New PipelineRun    → travelportal-build-xxxxx
+Build              → BuildKit if the repo has a Dockerfile, otherwise Buildpacks
+Pipeline           → clone → detect → build → sign → update-values all succeed
+Self-trigger       → no second PipelineRun after the CI commit
+Harbor             → image digest signed, SBOM attestation present
 ```
 
-The Pipeline selects BuildKit when the repository contains a Dockerfile; otherwise it selects Buildpacks. When `update-values` pushes `values.yaml` with the commit message prefix `ci: update TravelPortal image digest`, the webhook fires again, the CEL filter rejects that CI commit, and no second PipelineRun starts.
-
-## Final validation checklist
-
-```bash
-kubectl get crd | grep triggers.tekton.dev
-kubectl get pods -n tekton-pipelines | grep triggers
-kubectl get sa repository-trigger-sa -n cicd
-kubectl get eventlistener travelportal-repository-listener -n cicd
-kubectl get svc el-travelportal-repository-listener -n cicd
-kubectl get endpoints el-travelportal-repository-listener -n cicd
-kubectl get triggerbinding travelportal-repository-binding -n cicd
-kubectl get triggertemplate travelportal-repository-template -n cicd
-kubectl get pipeline travelportal-pipeline-values-update -n cicd
-kubectl get pipelineruns -n cicd
-kubectl get pvc -n cicd
-kubectl get secret repo-git-credentials -n cicd
-```
-
-Expected:
-
-```text
-EventListener   → AVAILABLE=True, READY=True
-Service         → 8080:31877/TCP
-Endpoint        → :8080
-Direct POST     → HTTP/1.1 202 Accepted
-Webhook target  → http://10.12.92.3:31877
-```
+When `update-values` pushes `values.yaml` with the commit message prefix `ci: update TravelPortal image digest`, the webhook fires again, the CEL filter rejects that CI commit, and no second PipelineRun starts.
 
 | Problem | Cause | Action |
 |---|---|---|
