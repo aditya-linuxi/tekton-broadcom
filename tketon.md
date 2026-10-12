@@ -161,7 +161,7 @@ The YAML manifests are not pasted inline. They are stored in the repository belo
 
 **Note:** The keda-vks repository is private. You need access before the links open or the clone works.
 
-### 6.2 Get the file#### 7.8.1 Cloudflare API token
+### 7.8.1 Cloudflare API token
 
 File `cloudflare-secret.yaml`:
 
@@ -696,6 +696,32 @@ The browser must show a valid certificate and the Tekton Dashboard.
 
 **Production:** the Dashboard can act on the cluster. Add authentication, RBAC and network restrictions before wider use.
 
+### 7.5 Create a Let's Encrypt ClusterIssuer
+
+File `cluster-issuer.yaml`:
+
+| Important argument | Value |
+|---|---|
+| ClusterIssuer name | `letsencrypt-prod` |
+| email | `<ACME_CONTACT_EMAIL>` (replace with the environment's contact email) |
+| server | `https://acme-v02.api.letsencrypt.org/directory` |
+| privateKeySecretRef | `letsencrypt-prod-account-key` |
+| Solver | `dns01`, Cloudflare |
+| apiTokenSecretRef | Secret `cloudflare-api-token`, key `api-token` (must be available to cert-manager) |
+
+File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cluster-issuer.yaml
+
+Apply the ClusterIssuer:
+
+```bash
+kubectl apply -f cluster-issuer.yaml
+```
+
+Check its status:
+
+```bash
+kubectl get clusterissuer letsencrypt-prod
+```
 ## 9. Create the cicd Namespace with its Security Label
 
 The namespace and its label are one setup step. A namespace without the label causes avoidable build-workload failures later.
