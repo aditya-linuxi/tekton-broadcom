@@ -161,7 +161,17 @@ The YAML manifests are not pasted inline. They are stored in the repository belo
 
 **Note:** The keda-vks repository is private. You need access before the links open or the clone works.
 
-### 6.2 Get the files
+### 6.2 Get the file#### 7.8.1 Cloudflare API token
+
+File `cloudflare-secret.yaml`:
+
+YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret.yaml
+
+```yaml
+stringData:
+  # Replace with the Cloudflare API token created in the Cloudflare account.
+  # Do NOT commit the real value to Git.
+  api-token: <CLOUDFLARE_API_TOKEN>s
 
 ```bash
 git clone https://github.com/kondurupurandhar/keda-vks.git
@@ -174,7 +184,6 @@ cd keda-vks/manifest/tekton-catalyst
 
 ```bash
 vcf context list
-~~vcf cluster list -A.~~
 vcf context use wl:<TARGET_VKS_CLUSTER_NAME>
 ```
 
@@ -207,22 +216,8 @@ curl -I https://ghcr.io/v2/
 
 Install cert-manager Using VKS Package Management
 
-#### 7.4.1 Switch to the Supervisor Context
+### Retrieve details about the available cert-manager package:
 
-VKS package management commands are executed from the Supervisor context. Switch to the Supervisor context for the target VKS cluster namespace before checking available package releases.
-
-```bash
-vcf context use supervisor:${VKS_CLUSTER_NAMESPACE}
-```
-
-#### 7.4.2 Check Available Releases
-
-List the available package releases to identify the cert-manager package and its supported version.
-```bash
-vcf package available list -A
-```
-
-Retrieve details about the available cert-manager package:
 ```
 vcf package available get \
   cert-manager.kubernetes.vmware.com \
@@ -277,32 +272,9 @@ kubectl get namespaces
 kubectl get all -n cert-manager
 ```
 
-### 7.5 Create a Let's Encrypt ClusterIssuer
 
-File `cluster-issuer.yaml`:
 
-| Important argument | Value |
-|---|---|
-| ClusterIssuer name | `letsencrypt-prod` |
-| email | `<ACME_CONTACT_EMAIL>` (replace with the environment's contact email) |
-| server | `https://acme-v02.api.letsencrypt.org/directory` |
-| privateKeySecretRef | `letsencrypt-prod-account-key` |
-| Solver | `dns01`, Cloudflare |
-| apiTokenSecretRef | Secret `cloudflare-api-token`, key `api-token` (must be available to cert-manager) |
 
-File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cluster-issuer.yaml
-
-Apply the ClusterIssuer:
-
-```bash
-kubectl apply -f cluster-issuer.yaml
-```
-
-Check its status:
-
-```bash
-kubectl get clusterissuer letsencrypt-prod
-```
 
 ### 7.6 Install Istio Using VKS Package Management
 
@@ -318,10 +290,9 @@ vcf package available get \
 
 #### 7.6.2 Set the Istio version
 
-Confirm that the following version is available in the target repository.
-
-```text
-1.28.2+vmware.1-vks.1
+```
+export ISTIO_VERSION=1.28.2+vmware.1-vks.1
+export ISTIO_RELEASE_NAME=istio.kubernetes.vmware.com
 ```
 
 #### 7.6.3 Create the namespace
@@ -334,10 +305,9 @@ kubectl create namespace istio-system
 
 ```bash
 vcf package available get \
-  istio.kubernetes.vmware.com/1.28.2+vmware.1-vks.1 \
+  istio.kubernetes.vmware.com/${ISTIO_VERSION} \
   -n vmware-system-tkg \
   --default-values-file-output istio-data-values.yaml
-
 cat istio-data-values.yaml
 ```
 
@@ -363,7 +333,7 @@ cat istio-data-values.yaml
 ```bash
 vcf package install istio \
   --package istio.kubernetes.vmware.com \
-  --version "1.28.2+vmware.1-vks.1" \
+  --version "${ISTIO_VERSION}" \
   -n vmware-system-tkg \
   --values-file istio-data-values.yaml \
   --dry-run
@@ -374,7 +344,7 @@ vcf package install istio \
 ```bash
 vcf package install istio \
   --package istio.kubernetes.vmware.com \
-  --version "1.28.2+vmware.1-vks.1" \
+  --version "${ISTIO_VERSION}" \
   -n vmware-system-tkg \
   --values-file istio-data-values.yaml \
   --wait
@@ -398,10 +368,10 @@ kubectl get pods -n cert-manager
 kubectl get pods -n istio-system
 kubectl get pods -n istio-ingress
 kubectl get gatewayclass istio
-kubectl get clusterissuer letsencrypt-prod
 ```
 
 Expected result: all Pods `Running`, GatewayClass `istio` is `ACCEPTED=True`, ClusterIssuer is `READY=True`.
+
 
 ### 7.8 External DNS
 
@@ -417,6 +387,13 @@ stringData:
   # Do NOT commit the real value to Git.
   api-token: <CLOUDFLARE_API_TOKEN>
 ```
+### create  Namespace and Cloudflare Secret 
+
+```bash 
+kubectl create namespace tanzu-system-service-discovery
+kubectl apply -f cloudflare-secret.yaml
+
+```
 
 #### 7.8.2 Install External DNS
 
@@ -425,10 +402,6 @@ File `external-dns-values.yaml`:
 YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/external-dns-values.yaml
 
 ```bash
-# 1. Namespace and Cloudflare Secret (workload cluster context; replace the placeholder first)
-kubectl create namespace tanzu-system-service-discovery
-kubectl apply -f cloudflare-secret.yaml
-
 # 2. Install the package from the Supervisor context
 vcf context use supervisor:<TARGET_VKS_CLUSTER_NAMESPACE>
 vcf package install external-dns \
