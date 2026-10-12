@@ -566,6 +566,60 @@ kubectl get pods,deployment,svc -n tekton-pipelines | grep dashboard
 
 Expected result: `tekton-dashboard` Pod and Deployment `1/1 Running`; Service `tekton-dashboard` on port `9097`.
 
+## 9. Create the cicd Namespace with its Security Label
+
+The namespace and its label are one setup step. A namespace without the label causes avoidable build-workload failures later.
+```bash
+# 1. Check
+kubectl get namespace cicd
+
+# 2. Create only if it does not exist
+kubectl create namespace cicd
+
+# 3. Apply the label immediately
+kubectl label namespace cicd \
+  pod-security.kubernetes.io/enforce=privileged \
+  --overwrite
+```
+
+**Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
+
+### 7.5 Create a Let's Encrypt ClusterIssuer
+
+File `cluster-issuer.yaml`:
+
+| Important argument | Value |
+|---|---|
+| ClusterIssuer name | `letsencrypt-prod` |
+| email | `<ACME_CONTACT_EMAIL>` (replace with the environment's contact email) |
+| server | `https://acme-v02.api.letsencrypt.org/directory` |
+| privateKeySecretRef | `letsencrypt-prod-account-key` |
+| Solver | `dns01`, Cloudflare |
+| apiTokenSecretRef | Secret `cloudflare-api-token`, key `api-token` (must be available to cert-manager) |
+
+File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cluster-issuer.yaml
+
+Apply the ClusterIssuer:
+
+```bash
+kubectl apply -f cluster-issuer.yaml
+```
+
+Check its status:
+
+```bash
+kubectl get clusterissuer letsencrypt-prod
+```
+
+### 9.1 Validation
+
+```bash
+kubectl get namespace cicd --show-labels
+kubectl get namespace cicd  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'
+
+```
+Expected result: `Active`, with `pod-security.kubernetes.io/enforce=privileged` in the labels.
+
 ## 11. Istio Integration: Expose the Dashboard
 
 All three resources are created in `tekton-pipelines`, the namespace of the `tekton-dashboard` Service, so no cross-namespace reference is needed. Apply them in this order: Certificate, Gateway, HTTPRoute. All files are in `manifest/tekton-catalyst`.
@@ -695,60 +749,6 @@ The browser must show a valid certificate and the Tekton Dashboard.
 
 
 **Production:** the Dashboard can act on the cluster. Add authentication, RBAC and network restrictions before wider use.
-
-### 7.5 Create a Let's Encrypt ClusterIssuer
-
-File `cluster-issuer.yaml`:
-
-| Important argument | Value |
-|---|---|
-| ClusterIssuer name | `letsencrypt-prod` |
-| email | `<ACME_CONTACT_EMAIL>` (replace with the environment's contact email) |
-| server | `https://acme-v02.api.letsencrypt.org/directory` |
-| privateKeySecretRef | `letsencrypt-prod-account-key` |
-| Solver | `dns01`, Cloudflare |
-| apiTokenSecretRef | Secret `cloudflare-api-token`, key `api-token` (must be available to cert-manager) |
-
-File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cluster-issuer.yaml
-
-Apply the ClusterIssuer:
-
-```bash
-kubectl apply -f cluster-issuer.yaml
-```
-
-Check its status:
-
-```bash
-kubectl get clusterissuer letsencrypt-prod
-```
-## 9. Create the cicd Namespace with its Security Label
-
-The namespace and its label are one setup step. A namespace without the label causes avoidable build-workload failures later.
-
-```bash
-# 1. Check
-kubectl get namespace cicd
-
-# 2. Create only if it does not exist
-kubectl create namespace cicd
-
-# 3. Apply the label immediately
-kubectl label namespace cicd \
-  pod-security.kubernetes.io/enforce=privileged \
-  --overwrite
-```
-
-**Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
-
-### 9.1 Validation
-
-```bash
-kubectl get namespace cicd --show-labels
-kubectl get namespace cicd  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'
-
-```
-Expected result: `Active`, with `pod-security.kubernetes.io/enforce=privileged` in the labels.
 
 ## 14. Smoke Test: Task and TaskRun
 
