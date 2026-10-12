@@ -364,12 +364,6 @@ File `cloudflare-secret.yaml`:
 
 YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret.yaml
 
-```yaml
-stringData:
-  # Replace with the Cloudflare API token created in the Cloudflare account.
-  # Do NOT commit the real value to Git.
-  api-token: <CLOUDFLARE_API_TOKEN>
-```
 ### create  Namespace and Cloudflare Secret 
 
 ```bash 
