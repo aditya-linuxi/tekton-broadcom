@@ -161,23 +161,6 @@ The YAML manifests are not pasted inline. They are stored in the repository belo
 
 **Note:** The keda-vks repository is private. You need access before the links open or the clone works.
 
-### 7.8.1 Cloudflare API token
-
-File `cloudflare-secret.yaml`:
-
-YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret.yaml
-
-```yaml
-stringData:
-  # Replace with the Cloudflare API token created in the Cloudflare account.
-  # Do NOT commit the real value to Git.
-  api-token: <CLOUDFLARE_API_TOKEN>s
-
-```bash
-git clone https://github.com/kondurupurandhar/keda-vks.git
-cd keda-vks/manifest/tekton-catalyst
-```
-
 ## 7. Cluster Pre-checks
 
 ### 7.1 Access the VKS cluster
@@ -592,6 +575,8 @@ Expected result:c`Active`, with `pod-security.kubernetes.io/enforce=privileged` 
 
 **Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
 
+
+
 ### 7.5 Create a Let's Encrypt ClusterIssuer
 
 File `cluster-issuer.yaml`:
@@ -618,14 +603,30 @@ Check its status:
 ```bash
 kubectl get clusterissuer letsencrypt-prod
 ```
+### 7.8 Cloudflare API token for cert-manager
 
+ File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret-cert-manager.yaml
+ 
+ Apply:
+ 
+ ```
+kubectl apply -f cloudflare-secret.yaml
+
+ ```
+### Validate that the Secret
+
+
+```
+kubectl get secret cloudflare-api-token -n cert-manager
+```
+ 
 ## 11. Istio Integration: Expose the Dashboard
 
 All three resources are created in `tekton-pipelines`, the namespace of the `tekton-dashboard` Service, so no cross-namespace reference is needed. Apply them in this order: Certificate, Gateway, HTTPRoute. All files are in `manifest/tekton-catalyst`.
 
 ### 11.1 TLS certificate (cert-manager)
 
-File `tekton-dashboard-certificate.yaml`:
+File `tekton-dashboard-certificate.yaml`
 
 YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/tekton-dashboard-certificate.yaml
 
