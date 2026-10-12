@@ -396,17 +396,49 @@ kubectl apply -f cloudflare-secret.yaml
 ```
 
 #### 7.8.2 Install External DNS
+ 
+### 1. Define the ExternalDNS Version Variable
+ 
+```bash
+EXTERNAL_DNS_VERSION="0.20.0+vmware.1-vks.1"
+```
+### 2. Get the Available ExternalDNS Package
+ 
+```bash
+vcf package available get \
+  external-dns.kubernetes.vmware.com \
+  -n vmware-system-tkg
+```
+ 
+### 3. Get Package Details in YAML Format
+ 
+```bash
+vcf package available get \
+  external-dns.kubernetes.vmware.com \
+  -n vmware-system-tkg \
+  -o yaml
+```
+ 
+### 4. Export Default Values to the Values File
+ 
+```bash
+vcf package available get \
+  "external-dns.kubernetes.vmware.com/$EXTERNAL_DNS_VERSION" \
+  -n vmware-system-tkg \
+  --default-values-file-output external-dns-values.yaml
+```
+### Configure  external-dns-values.yaml
 
 File `external-dns-values.yaml`:
-
 YAML: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/external-dns-values.yaml
 
+
+### 5. Install the ExternalDNS Package
+ 
 ```bash
-# 2. Install the package from the Supervisor context
-vcf context use supervisor:<TARGET_VKS_CLUSTER_NAMESPACE>
 vcf package install external-dns \
   -p external-dns.kubernetes.vmware.com \
-  -v 0.20.0+vmware.1-vks.1 \
+  -v "$EXTERNAL_DNS_VERSION" \
   -n vmware-system-tkg \
   --values-file external-dns-values.yaml \
   --wait
