@@ -199,7 +199,7 @@ curl -I https://ghcr.io/v2/
 
 Install cert-manager Using VKS Package Management
 
-### Retrieve details about the available cert-manager package:
+###  7.4.1. Retrieve details about the available cert-manager package:
 
 ```
 vcf package available get \
@@ -207,7 +207,7 @@ vcf package available get \
   -n vmware-system-tkg
 ```
 
-#### 7.4.3 Set the Package Version
+#### 7.4.2 Set the Package Version
 
 The following version is from the source runbook. Confirm its availability in the target repository.
 ```bash
@@ -215,7 +215,7 @@ export CERT_MANAGER_VERSION=1.19.2+vmware.1-vks.1
 export CERT_MANAGER_RELEASE_NAME=cert-manager.kubernetes.vmware.com
 ```
 
-#### 7.4.4 Generate and Review the Data Values
+#### 7.4.3 Generate and Review the Data Values
 
 ```bash
 vcf package available get \
@@ -225,7 +225,7 @@ vcf package available get \
 cat cert-manager-data-values.yaml
 ```
 
-#### 7.4.5 Perform a Dry Run
+#### 7.4.4 Perform a Dry Run
 
 ```bash
 vcf package install cert-manager \
@@ -236,7 +236,7 @@ vcf package install cert-manager \
   --dry-run
 ```
 
-#### 7.4.6 Install cert-manager
+#### 7.4.5 Install cert-manager
 
 ```bash
 vcf package install cert-manager \
@@ -247,7 +247,7 @@ vcf package install cert-manager \
   --wait
 ```
 
-#### 7.4.7 Verify Installation
+#### 7.4.6 Verify Installation
 
 ```bash
 kubectl get packageinstall -n vmware-system-tkg
@@ -255,13 +255,9 @@ kubectl get namespaces
 kubectl get all -n cert-manager
 ```
 
+### 7.5 Install Istio Using VKS Package Management
 
-
-
-
-### 7.6 Install Istio Using VKS Package Management
-
-#### 7.6.1 Check available releases
+#### 7.5.1 Check available releases
 
 ```bash
 vcf package available list -A
@@ -271,20 +267,20 @@ vcf package available get \
   -n vmware-system-tkg
 ```
 
-#### 7.6.2 Set the Istio version
+#### 7.5.2 Set the Istio version
 
 ```
 export ISTIO_VERSION=1.28.2+vmware.1-vks.1
 export ISTIO_RELEASE_NAME=istio.kubernetes.vmware.com
 ```
 
-#### 7.6.3 Create the namespace
+#### 7.5.3 Create the namespace
 
 ```bash
 kubectl create namespace istio-system
 ```
 
-#### 7.6.4 Generate the data values file
+#### 7.5.4 Generate the data values file
 
 ```bash
 vcf package available get \
@@ -294,7 +290,7 @@ vcf package available get \
 cat istio-data-values.yaml
 ```
 
-#### 7.6.5 Enable the ingress gateway
+#### 7.5.5 Enable the ingress gateway
 
 Edit `istio-data-values.yaml` to include the following configuration while retaining other required package settings:
 
@@ -311,7 +307,7 @@ Review the updated file:
 cat istio-data-values.yaml
 ```
 
-#### 7.6.6 Perform a dry run
+#### 7.5.6 Perform a dry run
 
 ```bash
 vcf package install istio \
@@ -322,7 +318,7 @@ vcf package install istio \
   --dry-run
 ```
 
-#### 7.6.7 Install Istio
+#### 7.5.7 Install Istio
 
 ```bash
 vcf package install istio \
@@ -333,7 +329,7 @@ vcf package install istio \
   --wait
 ```
 
-#### 7.6.8 Verify installation
+#### 7.5.8 Verify installation
 
 ```bash
 kubectl get packageinstall istio \
@@ -344,7 +340,7 @@ kubectl get all -n istio-ingress
 kubectl get all -n istio-system
 ```
 
-### 7.7 Confirm Istio, cert-manager and the ClusterIssuer are ready
+### 7.6 Confirm Istio, cert-manager and the ClusterIssuer are ready
 
 ```bash
 kubectl get pods -n cert-manager
@@ -356,9 +352,9 @@ kubectl get gatewayclass istio
 Expected result: all Pods `Running`, GatewayClass `istio` is `ACCEPTED=True`, ClusterIssuer is `READY=True`.
 
 
-### 7.8 External DNS
+### 7.7  External DNS
 
-#### 7.8.1 Cloudflare API token
+#### 7.7.1 Cloudflare API token
 
 File `cloudflare-secret.yaml`:
 
@@ -372,7 +368,7 @@ kubectl apply -f cloudflare-secret.yaml
 
 ```
 
-#### 7.8.2 Install External DNS
+#### 7.7.2 Install External DNS
  
 ### 1. Define the ExternalDNS Version Variable
  
@@ -422,7 +418,7 @@ vcf package install external-dns \
   --wait
 ```
 
-#### 7.8.3 Create the External DNS ClusterRole and ClusterRoleBinding
+#### 7.7.3 Create the External DNS ClusterRole and ClusterRoleBinding
 
 **Create the External DNS ClusterRole**
 
@@ -445,7 +441,7 @@ kubectl apply -f  external-dns-cluster-roles.yaml
 kubectl apply -f external-dns-clusterrolebinding.yaml
 ```
 
-#### 7.8.4 Restart external-dns and Monitor Logs
+#### 7.7.4 Restart external-dns and Monitor Logs
 
 ```bash
 kubectl rollout restart deployment external-dns -n tanzu-system-service-discovery
@@ -454,7 +450,7 @@ kubectl get pods -n tanzu-system-service-discovery
 kubectl logs -n tanzu-system-service-discovery  -l app=external-dns -f
 ```
 
-#### 7.8.5 Confirm HTTPRoute permissions
+#### 7.7.5 Confirm HTTPRoute permissions
 
 ```bash
 kubectl auth can-i get httproutes.gateway.networking.k8s.io \
@@ -467,7 +463,7 @@ kubectl auth can-i watch httproutes.gateway.networking.k8s.io \
 
 Expected result: `yes` for all three.
 
-#### 7.8.6 Validation: External DNS
+#### 7.7.6 Validation: External DNS
 
 ```bash
 kubectl get pods -n tanzu-system-service-discovery
@@ -527,7 +523,7 @@ CRDs                          → tasks, taskruns, pipelines, pipelineruns (tekt
 Controller logs               → no ERROR / failed / panic / connection refused
 ```
 
-## 10. Install Tekton Dashboard
+## 9. Install Tekton Dashboard
 
 ```bash
 kubectl apply -f https://infra.tekton.dev/tekton-releases/dashboard/latest/release.yaml
@@ -535,7 +531,7 @@ kubectl apply -f https://infra.tekton.dev/tekton-releases/dashboard/latest/relea
 
 The Dashboard is installed into `tekton-pipelines`. It stays reachable only inside the cluster until Sections 7.8 and 11 to 13 are complete.
 
-### 10.1 Validation: Tekton Dashboard
+### 9.1 Validation: Tekton Dashboard
 
 ```bash
 kubectl get pods,deployment,svc -n tekton-pipelines | grep dashboard
@@ -543,7 +539,7 @@ kubectl get pods,deployment,svc -n tekton-pipelines | grep dashboard
 
 Expected result: `tekton-dashboard` Pod and Deployment `1/1 Running`; Service `tekton-dashboard` on port `9097`.
 
-## 9. Create the cicd Namespace with its Security Label
+## 10. Create the cicd Namespace with its Security Label
 
 The namespace and its label are one setup step. A namespace without the label causes avoidable build-workload failures later.
 ```bash
@@ -558,7 +554,7 @@ kubectl label namespace cicd \
   pod-security.kubernetes.io/enforce=privileged \
   --overwrite
 ```
-### 9.1 Validation
+### 10.1 Validation
 
 ```bash
 kubectl get namespace cicd --show-labels 
@@ -571,7 +567,7 @@ Expected result:c`Active`, with `pod-security.kubernetes.io/enforce=privileged` 
 
 
 
-### 7.5 Create a Let's Encrypt ClusterIssuer
+### 10.2 Create a Let's Encrypt ClusterIssuer
 
 File `cluster-issuer.yaml`:
 
@@ -597,7 +593,7 @@ Check its status:
 ```bash
 kubectl get clusterissuer letsencrypt-prod
 ```
-### 7.8 Cloudflare API token for cert-manager
+### 10.3 Cloudflare API token for cert-manager
 
  File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret-cert-manager.yaml
  
