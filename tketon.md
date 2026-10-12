@@ -401,6 +401,7 @@ kubectl apply -f cloudflare-secret.yaml
  
 ```bash
 EXTERNAL_DNS_VERSION="0.20.0+vmware.1-vks.1"
+EXTERNAL_DNS_PACKAGE="external-dns.kubernetes.vmware.com"
 ```
 ### 2. Get the Available ExternalDNS Package
  
@@ -494,7 +495,7 @@ Expected result: `yes` for all three.
 ```bash
 kubectl get pods -n tanzu-system-service-discovery
 kubectl get packageinstall -n vmware-system-tkg      # run in the Supervisor context
-kubectl logs -n tanzu-system-service-discovery -l app.kubernetes.io/name=external-dns
+kubectl logs -n tanzu-system-service-discovery  -l app=external-dns -f
 ```
 
 Expected result: the Pod is `Running` and the logs show no errors. If the label returns nothing, check the real labels with `kubectl get pods -n tanzu-system-service-discovery --show-labels`. The old document used `app.kubernetes.io/name=external-dns` and the Istio runbook used `app=external-dns` (TO VERIFY).
