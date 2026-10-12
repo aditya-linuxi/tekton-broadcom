@@ -581,6 +581,14 @@ kubectl label namespace cicd \
   pod-security.kubernetes.io/enforce=privileged \
   --overwrite
 ```
+### 9.1 Validation
+
+```bash
+kubectl get namespace cicd --show-labels 
+kubectl get namespace cicd  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'
+```
+
+Expected result:c`Active`, with `pod-security.kubernetes.io/enforce=privileged` in the labels. / privileged 
 
 **Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
 
@@ -610,15 +618,6 @@ Check its status:
 ```bash
 kubectl get clusterissuer letsencrypt-prod
 ```
-
-### 9.1 Validation
-
-```bash
-kubectl get namespace cicd --show-labels
-kubectl get namespace cicd  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'
-
-```
-Expected result: `Active`, with `pod-security.kubernetes.io/enforce=privileged` in the labels.
 
 ## 11. Istio Integration: Expose the Dashboard
 
