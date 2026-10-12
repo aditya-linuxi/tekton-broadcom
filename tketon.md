@@ -550,33 +550,6 @@ CRDs                          → tasks, taskruns, pipelines, pipelineruns (tekt
 Controller logs               → no ERROR / failed / panic / connection refused
 ```
 
-## 9. Create the cicd Namespace with its Security Label
-
-The namespace and its label are one setup step. A namespace without the label causes avoidable build-workload failures later.
-
-```bash
-# 1. Check
-kubectl get namespace cicd
-
-# 2. Create only if it does not exist
-kubectl create namespace cicd
-
-# 3. Apply the label immediately
-kubectl label namespace cicd \
-  pod-security.kubernetes.io/enforce=privileged \
-  --overwrite
-```
-
-**Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
-
-### 9.1 Validation
-
-```bash
-kubectl get namespace cicd --show-labels
-```
-
-Expected result: `Active`, with `pod-security.kubernetes.io/enforce=privileged` in the labels.
-
 ## 10. Install Tekton Dashboard
 
 ```bash
@@ -722,6 +695,34 @@ The browser must show a valid certificate and the Tekton Dashboard.
 
 
 **Production:** the Dashboard can act on the cluster. Add authentication, RBAC and network restrictions before wider use.
+
+## 9. Create the cicd Namespace with its Security Label
+
+The namespace and its label are one setup step. A namespace without the label causes avoidable build-workload failures later.
+
+```bash
+# 1. Check
+kubectl get namespace cicd
+
+# 2. Create only if it does not exist
+kubectl create namespace cicd
+
+# 3. Apply the label immediately
+kubectl label namespace cicd \
+  pod-security.kubernetes.io/enforce=privileged \
+  --overwrite
+```
+
+**Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
+
+### 9.1 Validation
+
+```bash
+kubectl get namespace cicd --show-labels
+kubectl get namespace cicd  -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'
+
+```
+Expected result: `Active`, with `pod-security.kubernetes.io/enforce=privileged` in the labels.
 
 ## 14. Smoke Test: Task and TaskRun
 
