@@ -565,7 +565,22 @@ Expected result:c`Active`, with `pod-security.kubernetes.io/enforce=privileged` 
 
 **Security note:** this label enables privileged capabilities for build workloads. In production, use the least-privilege settings your VKS, BuildKit and Buildpacks implementation and security policy support.
 
+### 10.3 Cloudflare API token for cert-manager
 
+ File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret-cert-manager.yaml
+ 
+ Apply:
+ 
+ ```
+kubectl apply -f cloudflare-secret.yaml
+
+ ```
+### Validate that the Secret
+
+
+```
+kubectl get secret cloudflare-api-token -n cert-manager
+```
 
 ### 10.2 Create a Let's Encrypt ClusterIssuer
 
@@ -593,22 +608,7 @@ Check its status:
 ```bash
 kubectl get clusterissuer letsencrypt-prod
 ```
-### 10.3 Cloudflare API token for cert-manager
 
- File: https://github.com/kondurupurandhar/keda-vks/blob/main/manifest/tekton-catalyst/cloudflare-secret-cert-manager.yaml
- 
- Apply:
- 
- ```
-kubectl apply -f cloudflare-secret.yaml
-
- ```
-### Validate that the Secret
-
-
-```
-kubectl get secret cloudflare-api-token -n cert-manager
-```
  
 ## 11. Istio Integration: Expose the Dashboard
 
