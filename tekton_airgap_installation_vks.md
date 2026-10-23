@@ -1,171 +1,112 @@
 # Tekton Pipelines and Tekton Dashboard Installation on VKS (Air-Gapped Environment)
+# Airgap Container Images
 
-## 1. Introduction
+## Air-Gap Images colums 
 
-- **VKS (vSphere Kubernetes Service):** A Kubernetes service provided by VMware Cloud Foundation for creating and managing Kubernetes clusters on vSphere infrastructure.
-- **Air-Gapped Environment:** A network-isolated environment with no outbound internet access. All container images, VKS packages, YAML manifests, and TLS certificates are served from internal infrastructure.
-- **Tekton Pipelines:** A Kubernetes-native CI/CD framework used to create and run automated pipelines as Kubernetes resources (`Task`, `TaskRun`, `Pipeline`, `PipelineRun`).
-- **Tekton Dashboard:** A web-based graphical interface for Tekton Pipelines that shows the real-time status, logs, and details of Tasks, TaskRuns, Pipelines, and PipelineRuns.
-- **Harbor (`lab25-harbor.lab25.sunfire.lab`):** The private container registry inside the air-gapped environment. It serves all pre-mirrored Tekton Pipelines, Tekton Dashboard, and base utility images, and stores application images built later by the pipeline.
-- **Internal Git Repository (`http://10.12.90.62`):** The internal Gitea server hosting the offline Kubernetes YAML manifests and application source repositories.
-- **External DNS / Internal DNS:** Automatically creates or maps internal DNS records (`tekton.k8slabs.com`) for exposed Kubernetes services so users can reach the Tekton Dashboard by hostname.
-- **Istio + Kubernetes Gateway API:** Provides the HTTPS entry point (a `Gateway` and an `HTTPRoute`) used to reach the Tekton Dashboard.
-- **cert-manager:** Issues the TLS certificate for the Dashboard hostname using an internal/private Certificate Authority (`ClusterIssuer`) rather than a public internet ACME server.
+| Column 1 | Column 2 | Column 3 | Column 4 | Column 5 | Column 6 |
+| --- | --- | --- | --- | --- | --- |
+| Container Images Required for Air-Gapped Installation |  |  |  |  |  |
+|  |  |  |  |  |  |
+| Images Required for Tekton Pipeline |  |  |  |  |  |
+| Source file: tekton-pipeline-release.yaml |  |  |  |  |  |
+| Sr. No. | Component / Task | Source Image | Version | Purpose | Air-Gap Action |
+| 1 | Tekton Pipeline Controller | ghcr.io/tektoncd/pipeline/controller-10a3e32792f33651396d02b6855a6e36:v1.17.0 | v1.17.0 | Runs Tekton Pipelines | Mirror to Harbor |
+| 2 | Tekton Pipeline Entrypoint | ghcr.io/tektoncd/pipeline/entrypoint-bff0a22da108bc2f16c818c97641a296:v1.17.0 | v1.17.0 | Executes Task steps | Mirror to Harbor |
+| 3 | Tekton Pipeline Nop | ghcr.io/tektoncd/pipeline/nop-8eac7c133edad5df719dc37b36b62482:v1.17.0 | v1.17.0 | Handles no-op steps | Mirror to Harbor |
+| 4 | Tekton Sidecar Log Results | ghcr.io/tektoncd/pipeline/sidecarlogresults-7501c6a20d741631510a448b48ab098f:v1.17.0 | v1.17.0 | Collects step results | Mirror to Harbor |
+| 5 | Tekton Working Directory Init | ghcr.io/tektoncd/pipeline/workingdirinit-0c558922ec6a1b739e550e349f2d5fc1:v1.17.0 | v1.17.0 | Prepares Task working directories | Mirror to Harbor |
+| 6 | Tekton Pipeline Webhook | ghcr.io/tektoncd/pipeline/webhook-d4749e605405422fd87700164e31b2d1:v1.17.0 | v1.17.0 | Validates and processes Pipeline resources | Mirror to Harbor |
+| 7 | Tekton Shell | cgr.dev/chainguard/busybox | Digest-pinned in manifest | Runs shell commands in steps | Mirror to Harbor |
+|  |  |  |  |  |  |
+|  |  |  |  |  |  |
+| Images Required for Tekton Dashboard |  |  |  |  |  |
+| Source file: tekton-dashboard-release.yaml |  |  |  |  |  |
+| Sr. No. | Component / Task | Source Image | Version | Purpose | Air-Gap Action |
+| 1 | Tekton Dashboard | ghcr.io/tektoncd/dashboard/dashboard-9623576a202fe86c8b7d1bc489905f86:v0.73.0 | v0.73.0 | Provides the web UI for Tekton | Mirror to Harbor |
+|  |  |  |  |  |  |
+|  |  |  |  |  |  |
+| Images Required for Tekton Triggers |  |  |  |  |  |
+| Source files: tekton-triggers-release.yaml and the Core Interceptors manifest, if maintained separately. |  |  |  |  |  |
+| Sr. No. | Component / Task | Source Image | Version | Purpose | Air-Gap Action |
+| 1 | Tekton Triggers Controller | ghcr.io/tektoncd/triggers/controller-f656ca31de179ab913fa76abc255c315:v0.35.3 | v0.35.3 | Reconciles Trigger resources and creates PipelineRuns | Mirror to Harbor |
+| 2 | Tekton EventListener Sink | ghcr.io/tektoncd/triggers/eventlistenersink-7ad1faa98cddbcb0c24990303b220bb8:v0.35.3 | v0.35.3 | Receives and forwards webhook events | Mirror to Harbor |
+| 3 | Tekton Triggers Webhook | ghcr.io/tektoncd/triggers/webhook-dd1edc925ee1772a9f76e2c1bc291ef6:v0.35.3 | v0.35.3 | Validates and mutates Trigger resources | Mirror to Harbor |
+| 4 | Tekton Core Interceptors | ghcr.io/tektoncd/triggers/interceptors-3176d6a3f314c3655b30bfd36e421dd5:v0.34.0 | v0.34.0 | Provides CEL, GitHub, GitLab, Bitbucket and Slack interceptors | Mirror to Harbor |
+|  |  |  |  |  |  |
+|  |  |  |  |  |  |
+| Images Required for Pipeline Tasks |  |  |  |  |  |
+| Source files: Your individual Task YAML files, such as smoke-test, build-type detection, Git clone, BuildKit, Buildpacks, SBOM, signing and Git update Tasks. |  |  |  |  |  |
+| Sr. No. | Component / Task | Source Image | Version | Purpose | Air-Gap Action |
+| 1 | Smoke Test Task | alpine:3.20 | 3.20 | Runs the initial Tekton smoke test | Mirror to Harbor |
+| 2 | Detect Build Type Task | alpine:3.20 | 3.20 | Detects the application build type | Reuse the image from the Smoke Test Task |
+| 3 | Git Clone Task | alpine/git:latest | latest | Clones source code | Mirror to Harbor and pin a version |
+| 4 | BuildKit Task | moby/buildkit:latest | latest | Builds container images from Dockerfiles | Mirror to Harbor and pin a version |
+| 5 | Buildpacks Task — Skopeo/JQ | quay.io/halkyonio/skopeo-jq:0.1.3 | 0.1.3 | Supports image operations and JSON processing | Mirror the digest-pinned image |
+| 6 | Buildpacks Task — UBI Minimal | registry.access.redhat.com/ubi8/ubi-minimal | Digest-pinned in manifest | Provides a minimal UBI environment | Mirror the digest-pinned image |
+| 7 | Buildpacks Task — Python | registry.access.redhat.com/ubi8/python-311 | Digest-pinned in manifest | Provides a Python runtime/build environment | Mirror the digest-pinned image |
+| 8 | Buildpacks Builder | paketobuildpacks/builder-jammy-base | Pin the selected digest | Builds applications using Cloud Native Buildpacks | Mirror the builder and all required build/run images |
+| 9 | SBOM Generation | anchore/syft:latest | latest | Generates a software bill of materials | Mirror to Harbor and pin a version |
+| 10 | Image Signing / Attestation | ghcr.io/sigstore/cosign/cosign:v2.4.1 | v2.4.1 | Signs and attests built images | Mirror to Harbor |
+| 11 | Sign Task Helper | alpine:3.20 | 3.20 | Reads image digests or runs helper commands | Reuse the image from the Smoke Test Task |
+| 12 | Update Values Task | alpine/git:latest | latest | Updates the Git repository after a build | Reuse the Git Clone image; pin a version |
+|  |  |  |  |  |  |
+|  |  |  |  |  |  |
+| Application Image Produced by the Pipeline |  |  |  |  |  |
+| Sr. No. | Component / Task | Source Image | Version | Purpose | Air-Gap Action |
+| 1 | Application Output | lab25-harbor.lab25.sunfire.lab/cicd/travelportal:latest | latest (build output tag) | Stores the built Travel Portal application image in Harbor | Build and push to the internal Harbor registry |
+| This is an output image created by your pipeline, not an upstream image that needs to be mirrored before installation. |  |  |  |  |  |
 
-## 2. Architecture
 
-### 2.1 Architecture Diagram and Flow
+## 1. Tekton Image Relocation Table (`imgpkg copy` Commands)
 
-In an air-gapped VKS environment, all components run inside the VKS cluster and pull container images exclusively from the local Harbor registry (`lab25-harbor.lab25.sunfire.lab`). No external internet endpoints (`infra.tekton.dev`, `ghcr.io`, `docker.io`, or `letsencrypt.org`) are contacted.
+> **Important Note on Your Original Commands:** 
+> 1. Your original commands had truncated SHA256 hashes ending in `…` (which will cause terminal errors) and included `:v1.17.0` at the end of `--to-repo` (which is invalid in `imgpkg`). 
+> 2. In the table below, the **Cleaned & Ready-to-Use Command** column removes the invalid tag on `--to-repo` and uses the version tag so it can be run cleanly without failing on a cut-off SHA hash.
 
-```text
-  Admin (Jumpbox)                           User (Browser)
-      │ 1. kubectl apply local YAMLs            │ https://tekton.k8slabs.com
-      ▼                                         ▼
-  Internal Git (Gitea)                      Internal DNS / External DNS
-  http://10.12.90.62                            │ resolves to Istio Gateway IP
-      │                                         ▼
-┌─────────────────────────────── VKS Cluster ────────────────────────────────┐
-│                                                                            │
-│  ┌─ namespace: cert-manager ────────────────────────────────────────────┐  │
-│  │ cert-manager ─► Private CA ClusterIssuer ─► issues Dashboard TLS     │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                            │
-│  ┌─ namespace: istio-system / istio-ingress ────────────────────────────┐  │
-│  │ Istio Ingress Gateway ─► terminates HTTPS for tekton.k8slabs.com     │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                            │
-│  ┌─ namespace: tanzu-system-service-discovery ──────────────────────────┐  │
-│  │ External DNS ─► publishes Dashboard DNS record to Internal DNS       │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                            │
-│  ┌─ namespace: tekton-pipelines ────────────────────────────────────────┐  │
-│  │ Tekton Pipelines Controller & Webhook     Tekton Dashboard  ◄── User │  │
-│  │ Gateway (HTTPS :443)  ─►  HTTPRoute  ─►   Service (:9097)            │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                            │
-│  ┌─ namespace: cicd ────────────────────────────────────────────────────┐  │
-│  │ Smoke Test Task (hello) ─► TaskRun (hello-taskrun)                   │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                            │
-└────────────────────────────────────────────────────────────────────────────┘
-      ▲
-      │ Pulls pre-mirrored Tekton, Dashboard & helper images over internal network
-      │
-  Harbor Registry (lab25-harbor.lab25.sunfire.lab)
-```
+| # | Component Name | Version | What This Command & Image Does | Cleaned & Ready-to-Use Command (Jumpbox / Bastion) |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | **Tekton Entrypoint** | `v1.17.0` | Copies the `entrypoint` binary image. Tekton injects this into **every step** of a TaskPod to control step ordering (making Step 2 wait until Step 1 completes). | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/entrypoint-bff0a22da108bc2f16c818c97641a296:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/entrypoint-bff0a22da108bc2f16c818c97641a296 --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **2** | **Tekton NOP (No-Op)** | `v1.17.0` | Copies the `nop` image. Used by Tekton to gracefully stop sidecar containers once all main Task steps have finished running. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/nop-8eac7c133edad5df719dc37b36b62482:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/nop-8eac7c133edad5df719dc37b36b62482 --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **3** | **Sidecar Log Results** | `v1.17.0` | Copies the `sidecarlogresults` helper image. Runs alongside Task pods to capture step outputs (`results`) and stream them back to the Tekton controller. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/sidecarlogresults-7501c6a20d741631510a448b48ab098f:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/sidecarlogresults-7501c6a20d741631510a448b48ab098f --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **4** | **Working Dir Init** | `v1.17.0` | Copies the `workingdirinit` init-container image. Creates and sets up permissions for shared `/workspace` directories before Task steps start. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/workingdirinit-0c558922ec6a1b739e550e349f2d5fc1:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/workingdirinit-0c558922ec6a1b739e550e349f2d5fc1 --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **5** | **Tekton Events** | `v1.17.0` | Copies the `events` controller image. Responsible for emitting Kubernetes events and CloudEvents when PipelineRuns or TaskRuns change status. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/events-a9042f7efb0cbade2a868a1ee5ddd52c:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/events-a9042f7efb0cbade2a868a1ee5ddd52c --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **6** | **Tekton Resolvers** | `v1.17.0` | Copies the `resolvers` controller image. Allows Tekton to pull Task and Pipeline definitions remotely from Git, OCI bundles, or Cluster scopes. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/resolvers-ff86b24f130c42b88983d3c13993056d:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/resolvers-ff86b24f130c42b88983d3c13993056d --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **7** | **Tekton Webhook** | `v1.17.0` | Copies the `webhook` admission controller image. Validates Tekton YAML syntax and sets default fields when you run `kubectl apply`. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/pipeline/webhook-d4749e605405422fd87700164e31b2d1:v1.17.0 --to-repo harbor.sunfire.lab/tektoncd/pipeline/webhook-d4749e605405422fd87700164e31b2d1 --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
+| **8** | **Tekton Dashboard** | `v0.73.0` | Copies the `dashboard` web UI image. Provides the graphical web dashboard to monitor Pipelines, Tasks, and logs inside your browser. | `imgpkg copy --cosign-signatures --include-non-distributable-layers -i ghcr.io/tektoncd/dashboard/dashboard-9623576a202fe86c8b7d1bc489905f86:v0.73.0 --to-repo harbor.sunfire.lab/tektoncd/dashboard/dashboard-9623576a202fe86c8b7d1bc489905f86 --registry-ca-cert-path /etc/docker/certs.d/harbor.sunfire.lab/ca.crt` |
 
-| Component / Step | What it means in plain words |
-|---|---|
-| Local Harbor Registry | Replaces Docker Hub, GHCR, and Google Container Registry; holds all Tekton and Dashboard images |
-| Internal Git / Jumpbox | Holds the offline YAML manifests modified to reference Harbor image paths |
-| VKS Package Management | Installs `cert-manager`, `istio`, and `external-dns` from the local VCF Supervisor package repository |
-| Private CA `ClusterIssuer` | Issues trusted TLS certificates offline without calling Let's Encrypt over the internet |
-| Tekton Pipelines | Runs the core CI/CD controller, webhook, and resolvers inside `tekton-pipelines` |
-| Tekton Dashboard | Provides the web UI on port `9097`, exposed via Istio Gateway and HTTPRoute at `https://tekton.k8slabs.com` |
-| Smoke Test (`cicd`) | Runs a simple `Task` and `TaskRun` using an image from Harbor to prove Tekton works end to end |
+---
 
-### 2.2 Namespaces
+## 2. `imgpkg` Flag-by-Flag Reference Table
 
-| Namespace | Contents |
-|---|---|
-| `tekton-pipelines` | Tekton Pipelines, Tekton Dashboard, Harbor pull secret, Gateway, Certificate, HTTPRoute |
-| `cicd` | Smoke test `Task` and `TaskRun` (and later application CI/CD Pipelines) |
-| `tanzu-system-service-discovery` | External DNS |
-| `istio-system`, `istio-ingress` | Istio control plane and Ingress Gateway |
-| `cert-manager` | cert-manager and Private CA secret / ClusterIssuer |
+This table explains what each argument inside your `imgpkg copy` command does and why it is required for an air-gapped Harbor transfer.
 
-## 3. Why Use Tekton Pipelines and Tekton Dashboard on Air-Gapped VKS?
+| Flag / Argument | Example Value | What It Does & Why You Need It |
+| :--- | :--- | :--- |
+| **`imgpkg copy`** | `imgpkg copy` | Carvel tool command that copies container images and OCI bundles between registries or tar files while preserving exact digests (`@sha256`). |
+| **`--cosign-signatures`** | *(Boolean Flag)* | Searches for and copies **Cosign cryptographic signatures** alongside the container image so offline security tools (like Kyverno) can verify the image wasn't tampered with. |
+| **`--include-non-distributable-layers`** | *(Boolean Flag)* | Forces the copy of restricted/foreign image layers that tools normally skip. Mandatory for air-gapped registries so pulls don't fail due to missing base layers. |
+| **`-i`** | `ghcr.io/tektoncd/...:v1.17.0` | **Source Image:** Defines the public upstream image on GitHub Container Registry (`ghcr.io`) to pull from. |
+| **`--to-repo`** | `harbor.sunfire.lab/tektoncd/...` | **Destination Repository:** Defines the target repository path inside your internal Harbor registry where the image will be pushed. *(Do not put `:tag` here).* |
+| **`--registry-ca-cert-path`** | `/etc/docker/certs.d/harbor.sunfire.lab/ca.crt` | **Custom Root CA Path:** Tells `imgpkg` to trust your private Harbor registry's self-signed or internal SSL certificate during the HTTPS push. |
 
-In plain terms, here is why this setup works well in a disconnected environment:
+---
 
-**Zero internet dependency.** Every controller, webhook, internal helper container, and dashboard image is pulled directly from your local Harbor registry (`lab25-harbor.lab25.sunfire.lab`).
+## 3. Kubernetes Proxy & Custom CA YAML Reference Table (`external-dns`)
 
-**Runs natively on VKS.** Tekton installs as standard Kubernetes deployments and CRDs inside your existing VKS cluster, requiring no external CI/CD virtual machines or SaaS runners.
+This table explains each section of the Kubernetes Pod specification used to allow `external-dns` to communicate through a corporate proxy and trust internal TLS certificates.
 
-**Uses built-in VKS platform services.** TLS certificates, ingress routing, and DNS are handled by VKS-managed packages (`cert-manager`, `istio`, and `external-dns`) already mirrored in your VCF environment.
+| YAML Field / Section | Configured Value | What It Is Used For |
+| :--- | :--- | :--- |
+| **`containers.name`** | `external-dns` | Defines the container running ExternalDNS (which syncs Kubernetes Ingresses/Services to your DNS server). |
+| **`env: HTTP_PROXY`** | `http://proxy.example.com:8080` | Routes all outbound unencrypted HTTP requests from the pod through your corporate forward proxy. |
+| **`env: HTTPS_PROXY`** | `http://proxy.example.com:8080` | Routes all outbound encrypted HTTPS requests (e.g., to external DNS APIs) through your corporate forward proxy. |
+| **`env: NO_PROXY`** | `10.0.0.0/8,kubernetes.default.svc` | **Bypass List:** Prevents the pod from sending internal cluster traffic (`10.0.0.0/8`) or Kubernetes API calls (`kubernetes.default.svc`) to the external corporate proxy. |
+| **`volumeMounts.name`** | `ca-bundle` | Attaches the certificate volume defined in `volumes` into the running container. |
+| **`volumeMounts.mountPath`** | `/etc/ssl/certs` | Mounts the certificates directly into the Linux system trust store path so the container trusts your proxy's SSL inspection certificate. |
+| **`volumeMounts.readOnly`** | `true` | Protects the mounted certificate files from being modified or deleted by the container. |
+| **`volumes.secret.secretName`** | `ca-proxy` | References the Kubernetes Secret (`ca-proxy`) in the same namespace that stores your corporate CA certificate bundle. |
 
-**One dashboard for visibility.** Teams can open `https://tekton.k8slabs.com` in their browser to inspect TaskRuns, PipelineRuns, and step logs without needing `kubectl` access to the cluster.
 
-**Ready for offline BuildKit, Buildpacks, and Cosign integration.** Once Tekton Pipelines and Tekton Dashboard are verified with the smoke test, the cluster is ready to plug in air-gapped build and signing tasks.
-
-## 4. Benefits
-
-| Benefit | In simple words |
-|---|---|
-| Fully offline operation | No outbound calls to `infra.tekton.dev`, `ghcr.io`, `docker.io`, or `letsencrypt.org`. |
-| Fast and reliable image pulls | All Tekton system and helper images are pulled over the local network from Harbor. |
-| Consistent with connected environments | Uses the exact same Kubernetes CRDs, namespaces, and Gateway API routing as an internet-connected VKS cluster. |
-| Visual troubleshooting | The Tekton Dashboard displays step-by-step logs and status in a browser. |
-| Secure HTTPS access | Istio Gateway and cert-manager secure the Dashboard with TLS using your internal Certificate Authority. |
-| Controlled upgrades | Pinning Tekton and Dashboard manifests and images in Harbor ensures nothing changes unexpectedly. |
-
-## 5. Prerequisites and Air-Gap Resource Plan
-
-### 5.1 Platform and Components
-
-| Component | Requirement |
-|---|---|
-| VMware Cloud Foundation / VKS | 9.x, target VKS workload cluster available |
-| Kubernetes | 1.28 or later (Tekton requirement) |
-| VKS Package Repository | Local Supervisor package repo containing `cert-manager`, `istio`, and `external-dns` |
-| cert-manager | Installed through VKS package management |
-| Istio | Installed through VKS package management, with Gateway API CRDs present |
-| ClusterIssuer | Internal CA `ClusterIssuer` (`ca-issuer` or lab pre-configured issuer) |
-| External DNS / Internal DNS | VKS package `external-dns.kubernetes.vmware.com` configured for internal DNS (or static internal DNS record for `tekton.k8slabs.com`) |
-| Harbor | `lab25-harbor.lab25.sunfire.lab` reachable from the Jumpbox and all VKS worker nodes |
-| Harbor CA Trust | VKS worker nodes configured to trust the Harbor TLS CA certificate |
-| Internal Git Server | Gitea available at `http://10.12.90.62` |
-| Permissions | `cluster-admin` on the VKS cluster |
-
-### 5.2 Required CLI Tools on the Air-Gapped Jumpbox
-
-```bash
-vcf version
-kubectl version --client
-git --version
-curl --version
-sed --version
-```
-
-### 5.3 Air-Gap Resource Plan: Required Harbor Images (Already Pushed)
-
-Confirm that the following Tekton Pipelines, Tekton Dashboard, and smoke-test images are present in your Harbor registry (`lab25-harbor.lab25.sunfire.lab/tekton/...` or your target Harbor project).
-
-> **Important:** Tekton Pipelines uses several helper images passed as command-line arguments to `tekton-pipelines-controller` (such as `entrypoint`, `nop`, `workingdirinit`, `sidecarlogresults`, and `shell-image`). Every one of these must point to Harbor in `tekton-pipeline-release.yaml`, or TaskRuns will fail with `ImagePullBackOff`.
-
-| Component | Purpose | Original Upstream Image | Target Harbor Image Path (Example) |
-|---|---|---|---|
-| Pipelines Controller | Core Tekton controller | `ghcr.io/tektoncd/pipeline/controller-*` | `lab25-harbor.lab25.sunfire.lab/tekton/controller:<TAG>` |
-| Pipelines Webhook | Validation/mutation webhook | `ghcr.io/tektoncd/pipeline/webhook-*` | `lab25-harbor.lab25.sunfire.lab/tekton/webhook:<TAG>` |
-| Pipelines Resolvers | Git/Hub/Cluster resolvers | `ghcr.io/tektoncd/pipeline/resolvers-*` | `lab25-harbor.lab25.sunfire.lab/tekton/resolvers:<TAG>` |
-| Events Controller | Tekton events controller | `ghcr.io/tektoncd/pipeline/events-*` | `lab25-harbor.lab25.sunfire.lab/tekton/events:<TAG>` |
-| Entrypoint | Wraps every Task step execution | `ghcr.io/tektoncd/pipeline/entrypoint-*` | `lab25-harbor.lab25.sunfire.lab/tekton/entrypoint:<TAG>` |
-| Nop | Stops sidecars after task completion | `ghcr.io/tektoncd/pipeline/nop-*` | `lab25-harbor.lab25.sunfire.lab/tekton/nop:<TAG>` |
-| Workingdirinit | Initializes task working directories | `ghcr.io/tektoncd/pipeline/workingdirinit-*` | `lab25-harbor.lab25.sunfire.lab/tekton/workingdirinit:<TAG>` |
-| Sidecarlogresults | Extracts step results from logs | `ghcr.io/tektoncd/pipeline/sidecarlogresults-*` | `lab25-harbor.lab25.sunfire.lab/tekton/sidecarlogresults:<TAG>` |
-| Kubeconfigwriter | Writes kubeconfig for cluster tasks | `ghcr.io/tektoncd/pipeline/kubeconfigwriter-*` | `lab25-harbor.lab25.sunfire.lab/tekton/kubeconfigwriter:<TAG>` |
-| Imagedigestexporter | Exports built image digests | `ghcr.io/tektoncd/pipeline/imagedigestexporter-*` | `lab25-harbor.lab25.sunfire.lab/tekton/imagedigestexporter:<TAG>` |
-| Pullrequest-init | PR resource initialization | `ghcr.io/tektoncd/pipeline/pullrequest-init-*` | `lab25-harbor.lab25.sunfire.lab/tekton/pullrequest-init:<TAG>` |
-| Shell Image (Linux) | Runs `script:` blocks inside Tasks | `cgr.dev/chainguard/busybox` | `lab25-harbor.lab25.sunfire.lab/tekton/busybox:latest` |
-| Shell Image (Windows) | Windows script runner arg | `mcr.microsoft.com/powershell:nanoserver` | `lab25-harbor.lab25.sunfire.lab/tekton/powershell:nanoserver` |
-| Tekton Dashboard | Web UI for Tekton | `ghcr.io/tektoncd/dashboard/dashboard-*` | `lab25-harbor.lab25.sunfire.lab/tekton/dashboard:<TAG>` |
-| Smoke Test Image | Runs the `hello` smoke test Task | `docker.io/library/ubuntu` or `busybox` | `lab25-harbor.lab25.sunfire.lab/tekton/busybox:latest` |
-
-### 5.4 Air-Gap Resource Plan: Required Files and Manifests on Jumpbox
-
-| File Name | Purpose | Air-Gap Modification Required |
-|---|---|---|
-| `harbor-ca.crt` | Root CA certificate of Harbor / vCenter | Used to verify HTTPS connections to Harbor |
-| `ca.crt` and `ca.key` | Internal Root CA certificate and private key | Used by `cert-manager` to issue the Dashboard TLS certificate offline |
-| `cluster-issuer.yaml` | `ClusterIssuer` definition | Configured with `spec.ca.secretName: ca-key-pair` (instead of Let's Encrypt ACME) |
-| `tekton-pipeline-release.yaml` | Tekton Pipelines installation manifest | All `image:` fields and controller `args:` helper image flags updated to `lab25-harbor.lab25.sunfire.lab/tekton/...`, and `@sha256:...` digests removed if tags were re-pushed |
-| `tekton-dashboard-release.yaml` | Tekton Dashboard installation manifest | Dashboard `image:` updated to `lab25-harbor.lab25.sunfire.lab/tekton/dashboard:<TAG>` |
-| `tekton-dashboard-certificate.yaml` | cert-manager `Certificate` for `tekton.k8slabs.com` | `issuerRef.name` points to the air-gap `ClusterIssuer` |
-| `tekton-dashboard-gateway.yaml` | Istio `Gateway` on port 443 | Unchanged from connected setup |
-| `tekton-dashboard-httproute.yaml` | `HTTPRoute` pointing to `tekton-dashboard:9097` | Unchanged from connected setup |
-| `test-task.yaml` | Smoke test `Task` | Step `image:` updated to `lab25-harbor.lab25.sunfire.lab/tekton/busybox:latest` (or `ubuntu`) |
-| `taskrun.yaml` | Smoke test `TaskRun` (`hello-taskrun`) | Unchanged from connected setup |
 
 ## 6. Manifest Repository
 
@@ -220,318 +161,6 @@ curl -I http://10.12.90.62
 
 # Verify VKS Supervisor Package Repository is available in the cluster
 kubectl get packagerepository -A
-```
-
-### 7.4 Install cert-manager
-
-Install `cert-manager` using VKS Package Management (served from the local VCF Supervisor repository).
-
-#### 7.4.1 Retrieve details about the available cert-manager package
-
-```bash
-vcf package available get \
-  cert-manager.kubernetes.vmware.com \
-  -n vmware-system-tkg
-```
-
-#### 7.4.2 Set the Package Version
-
-Confirm the version available in your local VKS repository:
-
-```bash
-export CERT_MANAGER_VERSION=1.19.2+vmware.1-vks.1
-export CERT_MANAGER_RELEASE_NAME=cert-manager.kubernetes.vmware.com
-```
-
-#### 7.4.3 Generate and Review the Data Values
-
-```bash
-vcf package available get \
-  cert-manager.kubernetes.vmware.com/${CERT_MANAGER_VERSION} \
-  -n vmware-system-tkg \
-  --default-values-file-output cert-manager-data-values.yaml
-```
-
-Verify `cert-manager-data-values.yaml`:
-
-```bash
-cat cert-manager-data-values.yaml
-```
-
-#### 7.4.4 Perform a Dry Run
-
-```bash
-vcf package install cert-manager \
-  --package cert-manager.kubernetes.vmware.com \
-  --version "${CERT_MANAGER_VERSION}" \
-  -n vmware-system-tkg \
-  --values-file cert-manager-data-values.yaml \
-  --dry-run
-```
-
-#### 7.4.5 Install cert-manager
-
-```bash
-vcf package install cert-manager \
-  --package cert-manager.kubernetes.vmware.com \
-  --version "${CERT_MANAGER_VERSION}" \
-  -n vmware-system-tkg \
-  --values-file cert-manager-data-values.yaml \
-  --wait
-```
-
-#### 7.4.6 Verify Installation
-
-```bash
-kubectl get packageinstall -n vmware-system-tkg
-kubectl get namespaces
-kubectl get all -n cert-manager
-```
-
-### 7.5 Install Istio Using VKS Package Management
-
-#### 7.5.1 Check available releases
-
-```bash
-vcf package available list -A
-
-vcf package available get \
-  istio.kubernetes.vmware.com \
-  -n vmware-system-tkg
-```
-
-#### 7.5.2 Set the Istio version
-
-```bash
-export ISTIO_VERSION=1.28.2+vmware.1-vks.1
-export ISTIO_RELEASE_NAME=istio.kubernetes.vmware.com
-```
-
-#### 7.5.3 Generate the data values file
-
-```bash
-vcf package available get \
-  istio.kubernetes.vmware.com/${ISTIO_VERSION} \
-  -n vmware-system-tkg \
-  --default-values-file-output istio-data-values.yaml
-cat istio-data-values.yaml
-```
-
-#### 7.5.4 Enable the ingress gateway
-
-Edit `istio-data-values.yaml` to include the following configuration while retaining other required package settings:
-
-```yaml
-istio:
-  gateways:
-    ingress:
-      enabled: true
-```
-
-Review the updated file:
-
-```bash
-cat istio-data-values.yaml
-```
-
-#### 7.5.5 Perform a dry run
-
-```bash
-vcf package install istio \
-  --package istio.kubernetes.vmware.com \
-  --version "${ISTIO_VERSION}" \
-  -n vmware-system-tkg \
-  --values-file istio-data-values.yaml \
-  --dry-run
-```
-
-#### 7.5.6 Install Istio
-
-```bash
-vcf package install istio \
-  --package istio.kubernetes.vmware.com \
-  --version "${ISTIO_VERSION}" \
-  -n vmware-system-tkg \
-  --values-file istio-data-values.yaml \
-  --wait
-```
-
-#### 7.5.7 Verify installation
-
-```bash
-kubectl get packageinstall istio \
-  -n vmware-system-tkg
-
-kubectl get namespaces
-kubectl get all -n istio-ingress
-kubectl get all -n istio-system
-```
-
-### 7.6 Confirm Istio and cert-manager are ready
-
-```bash
-kubectl get pods -n cert-manager
-kubectl get pods -n istio-system
-kubectl get pods -n istio-ingress
-```
-
-Expected result: all Pods `Running`.
-
-### 7.7 External DNS (Internal DNS Integration)
-
-> **Air-Gap Note:** If your air-gapped environment uses an internal DNS provider supported by External DNS (such as RFC2136 / BIND, CoreDNS, or Infoblox), configure `external-dns-values.yaml` for that internal provider below. If you manage DNS manually in your internal lab DNS server (e.g., Windows DNS / dnsmasq), you can skip to Section 8 and create a static `A` record for `tekton.k8slabs.com` pointing to the Istio Gateway IP in Section 11.
-
-#### 7.7.1 Create Namespace
-
-Create the `tanzu-system-service-discovery` namespace to deploy and manage External DNS:
-
-```bash
-kubectl create namespace tanzu-system-service-discovery
-```
-
-#### 7.7.2 Add label to tanzu-system-service-discovery
-
-```bash
-kubectl label namespace tanzu-system-service-discovery pod-security.kubernetes.io/enforce=privileged --overwrite
-```
-
-#### 7.7.3 Create DNS Provider Secret (If Required by Internal DNS Provider)
-
-File `dns-secret.yaml` (or `cloudflare-secret.yaml` if running in a hybrid DNS lab):
-
-```bash
-kubectl apply -f dns-secret.yaml
-```
-
-#### 7.7.4 Install External DNS
-
-##### 7.7.4.1 Define the ExternalDNS Version Variable
-
-```bash
-EXTERNAL_DNS_VERSION="0.20.0+vmware.1-vks.1"
-EXTERNAL_DNS_PACKAGE="external-dns.kubernetes.vmware.com"
-```
-
-##### 7.7.4.2 Get the Available ExternalDNS Package
-
-```bash
-vcf package available get \
-  external-dns.kubernetes.vmware.com \
-  -n vmware-system-tkg
-```
-
-##### 7.7.4.3 Export Default Values to the Values File
-
-```bash
-vcf package available get \
-  "external-dns.kubernetes.vmware.com/$EXTERNAL_DNS_VERSION" \
-  -n vmware-system-tkg \
-  --default-values-file-output external-dns-values.yaml
-```
-
-##### 7.7.4.4 Configure `external-dns-values.yaml`
-
-Update `external-dns-values.yaml` with your internal DNS server parameters (`rfc2136` / internal provider) and target domain filter (`k8slabs.com`).
-
-##### 7.7.4.5 Perform dry-run
-
-```bash
-vcf package install external-dns \
-  -p external-dns.kubernetes.vmware.com \
-  -v "$EXTERNAL_DNS_VERSION" \
-  -n vmware-system-tkg \
-  --values-file external-dns-values.yaml \
-  --dry-run
-```
-
-##### 7.7.4.6 Install the ExternalDNS Package
-
-```bash
-vcf package install external-dns \
-  -p external-dns.kubernetes.vmware.com \
-  -v "$EXTERNAL_DNS_VERSION" \
-  -n vmware-system-tkg \
-  --values-file external-dns-values.yaml \
-  --wait
-```
-
-#### 7.7.5 Create the External DNS ClusterRole and ClusterRoleBinding
-
-FILE: `external-dns-cluster-roles.yaml`
-FILE: `external-dns-clusterrolebinding.yaml`
-
-```bash
-kubectl apply -f external-dns-cluster-roles.yaml
-kubectl apply -f external-dns-clusterrolebinding.yaml
-```
-
-#### 7.7.6 Restart external-dns and Monitor Logs
-
-```bash
-kubectl rollout restart deployment external-dns -n tanzu-system-service-discovery
-kubectl rollout status deployment external-dns -n tanzu-system-service-discovery
-kubectl get pods -n tanzu-system-service-discovery
-kubectl logs -n tanzu-system-service-discovery -l app=external-dns --tail=50
-```
-
-#### 7.7.7 Confirm HTTPRoute permissions
-
-```bash
-kubectl auth can-i get httproutes.gateway.networking.k8s.io \
-  --as=system:serviceaccount:tanzu-system-service-discovery:external-dns
-kubectl auth can-i list httproutes.gateway.networking.k8s.io \
-  --as=system:serviceaccount:tanzu-system-service-discovery:external-dns
-kubectl auth can-i watch httproutes.gateway.networking.k8s.io \
-  --as=system:serviceaccount:tanzu-system-service-discovery:external-dns
-```
-
-Expected result: `yes` for all three.
-
-## 8. Install Tekton Pipelines (Air-Gapped from Harbor)
-
-### 8.1 Create Namespace and Apply Security Label
-
-Create the namespace for Tekton Pipelines:
-
-```bash
-kubectl create namespace tekton-pipelines
-```
-
-Add the privileged pod-security label to the namespace:
-
-```bash
-kubectl label namespace tekton-pipelines pod-security.kubernetes.io/enforce=privileged --overwrite
-```
-
-Verify the `tekton-pipelines` namespace:
-
-```bash
-kubectl get namespace tekton-pipelines --show-labels
-kubectl get namespace tekton-pipelines -o jsonpath='{.metadata.labels.pod-security\.kubernetes\.io/enforce}{"\n"}'
-```
-
-Expected output for the last command:
-
-```text
-privileged
-```
-
-### 8.2 Create Harbor Pull Secret in `tekton-pipelines`
-
-If your Harbor project (`lab25-harbor.lab25.sunfire.lab/tekton`) requires authentication to pull images, create a Docker registry secret in `tekton-pipelines`:
-
-```bash
-kubectl create secret docker-registry harbor-registry-secret \
-  --docker-server=lab25-harbor.lab25.sunfire.lab \
-  --docker-username='<HARBOR_USERNAME>' \
-  --docker-password='<HARBOR_PASSWORD>' \
-  -n tekton-pipelines
-```
-
-Verify the secret:
-
-```bash
-kubectl get secret harbor-registry-secret -n tekton-pipelines
 ```
 
 ### 8.3 Prepare `tekton-pipeline-release.yaml` for Harbor
